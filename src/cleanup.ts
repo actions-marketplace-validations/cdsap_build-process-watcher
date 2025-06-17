@@ -219,12 +219,28 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
     svg += `<polyline points="${aggregatedPoints}" stroke="black" stroke-width="2" 
             stroke-dasharray="5,5" fill="none" opacity="0.9"/>\n`;
 
+    // Draw aggregated heap used line (dashed)
+    const aggregatedHeapPoints = timestamps.map((timestamp, i) => {
+        const x = margin.left + (i * xScale);
+        // Sum heapUsed for all processes at this timestamp
+        const heapSum = Array.from(processes.values())
+            .filter(p => p.timestamps.includes(timestamp))
+            .reduce((sum, p) => sum + p.heapUsed[p.timestamps.indexOf(timestamp)], 0);
+        const y = height - margin.bottom - (heapSum * yScale);
+        return `${x},${y}`;
+    }).join(' ');
+    svg += `<polyline points="${aggregatedHeapPoints}" stroke="black" stroke-width="2" stroke-dasharray="6,4" fill="none" opacity="0.9"/>\n`;
+
     // Add aggregated to legend
     const legendY = margin.top + 30 + (processes.size * 50);
     svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" 
             fill="black" opacity="0.9"/>\n`;
     svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" 
             font-size="14">Aggregated RSS</text>\n`;
+
+    // Add aggregated heap used to legend (dashed line)
+    svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 25}" x2="${width - margin.right + 60}" y2="${legendY + 25}" stroke="black" stroke-width="2" stroke-dasharray="6,4"/>\n`;
+    svg += `<text x="${width - margin.right + 70}" y="${legendY + 30}" font-size="14">Aggregated Heap Used</text>\n`;
 
     // Add axis labels
     svg += `<text x="${width/2}" y="${height - 10}" text-anchor="middle" font-size="16">Time</text>\n`;
@@ -288,7 +304,7 @@ ${mermaidChart}
 \`\`\`
 
 ### Overview
-- Number of processes monitored: ${processCount}
+- Number of(x) processes monitored: ${processCount}
 - Maximum RSS observed: ${maxRss.toFixed(2)} MB
 - Monitoring duration: ${duration}
 
