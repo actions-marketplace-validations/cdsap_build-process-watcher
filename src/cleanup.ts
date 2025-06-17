@@ -131,59 +131,61 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
     const xScale = (width - margin.left - margin.right) / (timestamps.length - 1) || 1;
     const yScale = (height - margin.top - margin.bottom) / yAxisMax;
 
-    // Colors for different processes
-    const colors = ['#FF9B9B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD', '#D4A5A5'];
+    // Improved color palette for clarity
+    const processColors = [
+        '#E4572E', // Red-Orange
+        '#29335C', // Navy
+        '#A8C686', // Green
+        '#669BBC', // Blue
+        '#F3A712', // Yellow
+        '#6A4C93', // Purple
+        '#43AA8B', // Teal
+        '#B370B0', // Magenta
+    ];
+    const aggRssColor = '#222'; // Black for Aggregated RSS
+    const aggHeapColor = '#1976D2'; // Blue for Aggregated Heap Used
 
     // Generate SVG content
     let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">\n`;
-    
-    // Add title with better positioning
+    svg += `<rect width="100%" height="100%" fill="#fff"/>\n`;
+    // Add title
     svg += `<text x="${width/2}" y="40" text-anchor="middle" font-size="24" font-weight="bold">Build Process Memory Usage Over Time</text>\n`;
 
     // Add grid lines (every 500MB)
     const gridInterval = 500; // MB
     for (let i = 0; i <= yAxisMax; i += gridInterval) {
         const y = height - margin.bottom - (i * yScale);
-        svg += `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" 
-                stroke="#e0e0e0" stroke-width="1" stroke-dasharray="5,5"/>\n`;
+        svg += `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="5,5"/>\n`;
     }
 
     // Draw axes
-    svg += `<line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" 
-            stroke="black" stroke-width="2"/>\n`;
-    svg += `<line x1="${margin.left}" y1="${height - margin.bottom}" x2="${margin.left}" y2="${margin.top}" 
-            stroke="black" stroke-width="2"/>\n`;
+    svg += `<line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#333" stroke-width="2"/>\n`;
+    svg += `<line x1="${margin.left}" y1="${height - margin.bottom}" x2="${margin.left}" y2="${margin.top}" stroke="#333" stroke-width="2"/>\n`;
 
     // Draw Y axis labels (every 500MB)
     for (let i = 0; i <= yAxisMax; i += gridInterval) {
         const y = height - margin.bottom - (i * yScale);
-        svg += `<text x="${margin.left - 10}" y="${y + 5}" text-anchor="end" font-size="12">${i}MB</text>\n`;
+        svg += `<text x="${margin.left - 10}" y="${y + 5}" text-anchor="end" font-size="12" fill="#333">${i}MB</text>\n`;
     }
 
     // Draw X axis labels (dynamic interval based on timestamp count)
     const labelInterval = Math.ceil(timestamps.length / 15); // Show ~15 labels
     for (let i = 0; i < timestamps.length; i += labelInterval) {
         const x = margin.left + (i * xScale);
-        svg += `<text x="${x}" y="${height - margin.bottom + 20}" 
-                transform="rotate(45 ${x},${height - margin.bottom + 20})" 
-                text-anchor="start" font-size="12">${timestamps[i]}</text>\n`;
+        svg += `<text x="${x}" y="${height - margin.bottom + 20}" transform="rotate(45 ${x},${height - margin.bottom + 20})" text-anchor="start" font-size="12" fill="#333">${timestamps[i]}</text>\n`;
     }
 
-    // Create legend background
-    svg += `<rect x="${width - margin.right + 20}" y="${margin.top}" 
-            width="${margin.right - 40}" height="${processes.size * 50 + 40}" 
-            fill="white" stroke="#e0e0e0"/>\n`;
-
     // Draw process lines and legend
+    let legendY = margin.top + 30;
     Array.from(processes.entries()).forEach(([key, data], idx) => {
+        const color = processColors[idx % processColors.length];
         // RSS line (solid)
         const rssPoints = data.timestamps.map((timestamp, i) => {
             const x = margin.left + (timestamps.indexOf(timestamp) * xScale);
             const y = height - margin.bottom - (data.rss[i] * yScale);
             return `${x},${y}`;
         }).join(' ');
-        svg += `<polyline points="${rssPoints}" stroke="${colors[idx % colors.length]}" stroke-width="2" fill="none" opacity="0.8"/>
-`;
+        svg += `<polyline points="${rssPoints}" stroke="${color}" stroke-width="2.5" fill="none" opacity="0.95"/>\n`;
 
         // Heap Used line (dashed)
         const heapPoints = data.timestamps.map((timestamp, i) => {
@@ -191,61 +193,44 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
             const y = height - margin.bottom - (data.heapUsed[i] * yScale);
             return `${x},${y}`;
         }).join(' ');
-        svg += `<polyline points="${heapPoints}" stroke="${colors[idx % colors.length]}" stroke-width="2" fill="none" opacity="0.8" stroke-dasharray="6,4"/>
-`;
+        svg += `<polyline points="${heapPoints}" stroke="${color}" stroke-width="2.5" fill="none" opacity="0.95" stroke-dasharray="8,5"/>\n`;
 
-        // Add legend for RSS
-        const legendY = margin.top + 30 + (idx * 50);
-        svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="6" fill="${colors[idx % colors.length]}" opacity="0.8"/>
-`;
-        svg += `<text x="${width - margin.right + 70}" y="${legendY - 2}" font-size="14">${key} (RSS)</text>
-`;
-        // Add legend for Heap Used
-        svg += `<rect x="${width - margin.right + 40}" y="${legendY + 10}" width="20" height="6" fill="${colors[idx % colors.length]}" opacity="0.8"/>
-`;
-        svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 13}" x2="${width - margin.right + 60}" y2="${legendY + 13}" stroke="${colors[idx % colors.length]}" stroke-width="2" stroke-dasharray="6,4"/>
-`;
-        svg += `<text x="${width - margin.right + 70}" y="${legendY + 18}" font-size="14">${key} (Heap Used)</text>
-`;
+        // Legend for this process
+        svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="6" fill="${color}" opacity="0.95"/>\n`;
+        svg += `<text x="${width - margin.right + 70}" y="${legendY - 2}" font-size="14" fill="#333">${key} (RSS)</text>\n`;
+        svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 13}" x2="${width - margin.right + 60}" y2="${legendY + 13}" stroke="${color}" stroke-width="2.5" stroke-dasharray="8,5"/>\n`;
+        svg += `<text x="${width - margin.right + 70}" y="${legendY + 18}" font-size="14" fill="#333">${key} (Heap Used)</text>\n`;
+        legendY += 40;
     });
 
-    // Draw aggregated line
+    // Draw aggregated RSS line (black, solid)
     const aggregatedPoints = timestamps.map((timestamp, i) => {
         const x = margin.left + (i * xScale);
         const y = height - margin.bottom - (aggregatedRss[i] * yScale);
         return `${x},${y}`;
     }).join(' ');
+    svg += `<polyline points="${aggregatedPoints}" stroke="${aggRssColor}" stroke-width="3.5" fill="none" opacity="0.9"/>\n`;
 
-    svg += `<polyline points="${aggregatedPoints}" stroke="black" stroke-width="2" 
-            stroke-dasharray="5,5" fill="none" opacity="0.9"/>\n`;
-
-    // Draw aggregated heap used line (dashed)
+    // Draw aggregated heap used line (blue, dashed)
     const aggregatedHeapPoints = timestamps.map((timestamp, i) => {
         const x = margin.left + (i * xScale);
-        // Sum heapUsed for all processes at this timestamp
         const heapSum = Array.from(processes.values())
             .filter(p => p.timestamps.includes(timestamp))
             .reduce((sum, p) => sum + p.heapUsed[p.timestamps.indexOf(timestamp)], 0);
         const y = height - margin.bottom - (heapSum * yScale);
         return `${x},${y}`;
     }).join(' ');
-    svg += `<polyline points="${aggregatedHeapPoints}" stroke="black" stroke-width="2" stroke-dasharray="6,4" fill="none" opacity="0.9"/>\n`;
+    svg += `<polyline points="${aggregatedHeapPoints}" stroke="${aggHeapColor}" stroke-width="3.5" fill="none" opacity="0.9" stroke-dasharray="8,5"/>\n`;
 
-    // Add aggregated to legend
-    const legendY = margin.top + 30 + (processes.size * 50);
-    svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" 
-            fill="black" opacity="0.9"/>\n`;
-    svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" 
-            font-size="14">Aggregated RSS</text>\n`;
-
-    // Add aggregated heap used to legend (dashed line)
-    svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 25}" x2="${width - margin.right + 60}" y2="${legendY + 25}" stroke="black" stroke-width="2" stroke-dasharray="6,4"/>\n`;
-    svg += `<text x="${width - margin.right + 70}" y="${legendY + 30}" font-size="14">Aggregated Heap Used</text>\n`;
+    // Aggregated legend
+    svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" fill="${aggRssColor}" opacity="0.9"/>\n`;
+    svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" font-size="14" fill="#333">Aggregated RSS</text>\n`;
+    svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 25}" x2="${width - margin.right + 60}" y2="${legendY + 25}" stroke="${aggHeapColor}" stroke-width="3.5" stroke-dasharray="8,5"/>\n`;
+    svg += `<text x="${width - margin.right + 70}" y="${legendY + 30}" font-size="14" fill="#333">Aggregated Heap Used</text>\n`;
 
     // Add axis labels
-    svg += `<text x="${width/2}" y="${height - 10}" text-anchor="middle" font-size="16">Time</text>\n`;
-    svg += `<text x="${margin.left - 60}" y="${height/2}" text-anchor="middle" 
-            transform="rotate(-90 ${margin.left - 60},${height/2})" font-size="16">Memory Usage (MB)</text>\n`;
+    svg += `<text x="${width/2}" y="${height - 10}" text-anchor="middle" font-size="16" fill="#333">Time</text>\n`;
+    svg += `<text x="${margin.left - 60}" y="${height/2}" text-anchor="middle" transform="rotate(-90 ${margin.left - 60},${height/2})" font-size="16" fill="#333">Memory Usage (MB)</text>\n`;
 
     svg += '</svg>';
     return svg;
