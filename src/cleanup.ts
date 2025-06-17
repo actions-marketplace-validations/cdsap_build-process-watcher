@@ -211,22 +211,9 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
     }).join(' ');
     svg += `<polyline points="${aggregatedPoints}" stroke="${aggRssColor}" stroke-width="3.5" fill="none" opacity="0.9"/>\n`;
 
-    // Draw aggregated heap used line (blue, dashed)
-    const aggregatedHeapPoints = timestamps.map((timestamp, i) => {
-        const x = margin.left + (i * xScale);
-        const heapSum = Array.from(processes.values())
-            .filter(p => p.timestamps.includes(timestamp))
-            .reduce((sum, p) => sum + p.heapUsed[p.timestamps.indexOf(timestamp)], 0);
-        const y = height - margin.bottom - (heapSum * yScale);
-        return `${x},${y}`;
-    }).join(' ');
-    svg += `<polyline points="${aggregatedHeapPoints}" stroke="${aggHeapColor}" stroke-width="3.5" fill="none" opacity="0.9" stroke-dasharray="8,5"/>\n`;
-
     // Aggregated legend
     svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" fill="${aggRssColor}" opacity="0.9"/>\n`;
     svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" font-size="14" fill="#333">Aggregated RSS</text>\n`;
-    svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 25}" x2="${width - margin.right + 60}" y2="${legendY + 25}" stroke="${aggHeapColor}" stroke-width="3.5" stroke-dasharray="8,5"/>\n`;
-    svg += `<text x="${width - margin.right + 70}" y="${legendY + 30}" font-size="14" fill="#333">Aggregated Heap Used</text>\n`;
 
     // Add axis labels
     svg += `<text x="${width/2}" y="${height - 10}" text-anchor="middle" font-size="16" fill="#333">Time</text>\n`;
