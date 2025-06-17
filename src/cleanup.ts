@@ -10,6 +10,8 @@ const execAsync = promisify(exec);
 interface ProcessData {
     timestamps: string[];
     rss: number[];
+    heapUsed: number[];
+    heapCap: number[];
 }
 
 function parseLogFile(logFile: string): { processes: Map<string, ProcessData>, timestamps: string[] } {
@@ -24,16 +26,20 @@ function parseLogFile(logFile: string): { processes: Map<string, ProcessData>, t
 
         const [timestamp, pid, name, heapUsed, heapCap, rss] = parts.map(p => p.trim());
         const rssValue = parseFloat(rss.replace('MB', ''));
+        const heapUsedValue = parseFloat(heapUsed.replace('MB', ''));
+        const heapCapValue = parseFloat(heapCap.replace('MB', ''));
         const processKey = `${pid}-${name}`;
 
         if (!processes.has(processKey)) {
-            processes.set(processKey, { timestamps: [], rss: [] });
+            processes.set(processKey, { timestamps: [], rss: [], heapUsed: [], heapCap: [] });
         }
 
         processes.get(processKey)!.timestamps.push(timestamp);
         processes.get(processKey)!.rss.push(rssValue);
         timestamps.add(timestamp);
-    });
+        processes.get(processKey)!.heapUsed.push(heapUsedValue);
+        processes.get(processKey)!.heapCap.push(heapCapValue);
+        });
 
     return { processes, timestamps: Array.from(timestamps).sort() };
 }
@@ -165,27 +171,42 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
 
     // Create legend background
     svg += `<rect x="${width - margin.right + 20}" y="${margin.top}" 
-            width="${margin.right - 40}" height="${processes.size * 30 + 40}" 
+            width="${margin.right - 40}" height="${processes.size * 50 + 40}" 
             fill="white" stroke="#e0e0e0"/>\n`;
 
     // Draw process lines and legend
     Array.from(processes.entries()).forEach(([key, data], idx) => {
-        const points = data.timestamps.map((timestamp, i) => {
+        // RSS line (solid)
+        const rssPoints = data.timestamps.map((timestamp, i) => {
             const x = margin.left + (timestamps.indexOf(timestamp) * xScale);
             const y = height - margin.bottom - (data.rss[i] * yScale);
             return `${x},${y}`;
         }).join(' ');
+        svg += `<polyline points="${rssPoints}" stroke="${colors[idx % colors.length]}" stroke-width="2" fill="none" opacity="0.8"/>
+`;
 
-        // Add line with slight opacity
-        svg += `<polyline points="${points}" stroke="${colors[idx % colors.length]}" 
-                stroke-width="2" fill="none" opacity="0.8"/>\n`;
+        // Heap Used line (dashed)
+        const heapPoints = data.timestamps.map((timestamp, i) => {
+            const x = margin.left + (timestamps.indexOf(timestamp) * xScale);
+            const y = height - margin.bottom - (data.heapUsed[i] * yScale);
+            return `${x},${y}`;
+        }).join(' ');
+        svg += `<polyline points="${heapPoints}" stroke="${colors[idx % colors.length]}" stroke-width="2" fill="none" opacity="0.8" stroke-dasharray="6,4"/>
+`;
 
-        // Add legend with better positioning
-        const legendY = margin.top + 30 + (idx * 30);
-        svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" 
-                fill="${colors[idx % colors.length]}" opacity="0.8"/>\n`;
-        svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" 
-                font-size="14">${key}</text>\n`;
+        // Add legend for RSS
+        const legendY = margin.top + 30 + (idx * 50);
+        svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="6" fill="${colors[idx % colors.length]}" opacity="0.8"/>
+`;
+        svg += `<text x="${width - margin.right + 70}" y="${legendY - 2}" font-size="14">${key} (RSS)</text>
+`;
+        // Add legend for Heap Used
+        svg += `<rect x="${width - margin.right + 40}" y="${legendY + 10}" width="20" height="6" fill="${colors[idx % colors.length]}" opacity="0.8"/>
+`;
+        svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 13}" x2="${width - margin.right + 60}" y2="${legendY + 13}" stroke="${colors[idx % colors.length]}" stroke-width="2" stroke-dasharray="6,4"/>
+`;
+        svg += `<text x="${width - margin.right + 70}" y="${legendY + 18}" font-size="14">${key} (Heap Used)</text>
+`;
     });
 
     // Draw aggregated line
@@ -199,7 +220,7 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
             stroke-dasharray="5,5" fill="none" opacity="0.9"/>\n`;
 
     // Add aggregated to legend
-    const legendY = margin.top + 30 + (processes.size * 30);
+    const legendY = margin.top + 30 + (processes.size * 50);
     svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" 
             fill="black" opacity="0.9"/>\n`;
     svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" 
