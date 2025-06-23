@@ -34,21 +34,26 @@ while true; do
 
     for PATTERN in "${PATTERNS[@]}"; do
       if [[ "$NAME" == "$PATTERN" ]]; then
-        GC_LINE=$(jstat -gc "$PID" 2>/dev/null | tail -n 1)
-        [[ -z "$GC_LINE" ]] && continue
+        {
+          GC_LINE=$(jstat -gc "$PID" 2>/dev/null | tail -n 1)
+          RSS_KB=$(ps -o rss= -p "$PID" 2>/dev/null | tr -d ' ')
+          [[ -z "$RSS_KB" ]] && continue
+          RSS_MB=$(awk "BEGIN { printf \"%.1f\", $RSS_KB / 1024 }")
 
-        EC=$(echo "$GC_LINE" | awk '{print $5}')
-        EU=$(echo "$GC_LINE" | awk '{print $6}')
-        OC=$(echo "$GC_LINE" | awk '{print $7}')
-        OU=$(echo "$GC_LINE" | awk '{print $8}')
+          if [[ -z "$GC_LINE" ]]; then
+            echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB" >> "$LOG_FILE"
+          else
+            EC=$(echo "$GC_LINE" | awk '{print $5}')
+            EU=$(echo "$GC_LINE" | awk '{print $6}')
+            OC=$(echo "$GC_LINE" | awk '{print $7}')
+            OU=$(echo "$GC_LINE" | awk '{print $8}')
 
-        HEAP_USED_MB=$(awk "BEGIN { printf \"%.1f\", ($EU + $OU) / 1024 }")
-        HEAP_CAP_MB=$(awk "BEGIN { printf \"%.1f\", ($EC + $OC) / 1024 }")
-        RSS_KB=$(ps -o rss= -p "$PID" 2>/dev/null | tr -d ' ')
-        [[ -z "$RSS_KB" ]] && continue
-        RSS_MB=$(awk "BEGIN { printf \"%.1f\", $RSS_KB / 1024 }")
+            HEAP_USED_MB=$(awk "BEGIN { printf \"%.1f\", ($EU + $OU) / 1024 }")
+            HEAP_CAP_MB=$(awk "BEGIN { printf \"%.1f\", ($EC + $OC) / 1024 }")
 
-        echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB" >> "$LOG_FILE"
+            echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB" >> "$LOG_FILE"
+          fi
+        } || { echo "[monitor.sh] Skipped process $PID ($NAME) at $TIMESTAMP due to error" >&2; continue; }
       fi
     done
   done <<< "$jps_output"
