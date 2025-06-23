@@ -276,7 +276,7 @@ ${mermaidChart}
 \`\`\`
 
 ### Overview
-- Number of(x) processes monitored: ${processCount}
+- Number of processes monitored: ${processCount}
 - Maximum RSS observed: ${maxRss.toFixed(2)} MB
 - Monitoring duration: ${duration}
 
