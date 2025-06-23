@@ -13,7 +13,7 @@ It tracks heap and RSS usage over time and generates a detailed log and optional
 Use this if you want a clean setup:
 
 ```yaml
-- uses: cdsap/build-process-watcher@v0.1
+- uses: cdsap/build-process-watcher@v0.2
 ```
 ✅ Automatically starts memory monitoring and runs cleanup at the end  
 ⚠️ Cleanup won't run if the job is killed by OOM or cancellation before the action step starts
@@ -23,13 +23,13 @@ Use this if you want guaranteed cleanup, even if the build fails:
 
 ```yaml
 steps:
-  - uses: cdsap/build-process-watcher/start@v0.1
+  - uses: cdsap/build-process-watcher/start@v0.2
     with:
       interval: 5
 
   - run: ./gradlew build
 
-  - uses: cdsap/build-process-watcher/cleanup@v0.1
+  - uses: cdsap/build-process-watcher/cleanup@v0.2
     if: always()
 ```
 ✅ More verbose  
