@@ -24,7 +24,6 @@ Generates log files and charts as workflow artifacts.
 - uses: cdsap/build-process-watcher@0.3
   with:
     remote_monitoring: 'true'
-    debug: 'true'
 ```
 
 Data sent to cloud backend with live dashboard (3-hour retention).  
