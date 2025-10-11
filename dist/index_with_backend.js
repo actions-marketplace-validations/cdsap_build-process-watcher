@@ -25794,7 +25794,8 @@ async function run() {
             BACKEND_URL: backendUrl,
             RUN_ID: runId,
             LOG_FILE: logFile,
-            DEBUG_MODE: debugMode.toString()
+            DEBUG_MODE: debugMode.toString(),
+            REMOTE_MONITORING: (enableBackend && backendUrl) ? 'true' : 'false'
         };
         const child = (0, child_process_1.spawn)(scriptPath, args, {
             cwd: path.join(actionDir, '..'), // Run in the repository root, not dist/
