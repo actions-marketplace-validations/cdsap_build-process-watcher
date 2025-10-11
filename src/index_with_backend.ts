@@ -63,9 +63,7 @@ async function run() {
     }
 
     // Start monitoring
-    const monitoringScript = enableBackend && backendUrl 
-      ? 'monitor_with_backend.sh' 
-      : 'monitor.sh';
+    const monitoringScript = 'monitor_with_backend.sh';
     
     if (debugMode) {
       core.info(`📜 Using monitoring script: ${monitoringScript}`);
