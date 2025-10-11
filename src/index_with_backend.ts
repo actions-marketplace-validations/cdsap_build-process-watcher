@@ -125,7 +125,8 @@ async function run() {
       ...process.env,
       BACKEND_URL: backendUrl,
       RUN_ID: runId,
-      LOG_FILE: logFile
+      LOG_FILE: logFile,
+      DEBUG_MODE: debugMode.toString()
     };
 
     const child = spawn(scriptPath, args, {

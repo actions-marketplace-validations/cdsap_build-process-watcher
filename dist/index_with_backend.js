@@ -25793,7 +25793,8 @@ async function run() {
             ...process.env,
             BACKEND_URL: backendUrl,
             RUN_ID: runId,
-            LOG_FILE: logFile
+            LOG_FILE: logFile,
+            DEBUG_MODE: debugMode.toString()
         };
         const child = (0, child_process_1.spawn)(scriptPath, args, {
             cwd: path.join(actionDir, '..'), // Run in the repository root, not dist/
