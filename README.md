@@ -2,45 +2,92 @@
 
 [![GitHub Marketplace](https://img.shields.io/badge/action-marketplace-blue?logo=github)](https://github.com/marketplace/actions/build-process-watcher)
 
-**Build Process Watcher** is a GitHub Action to monitor the memory usage of Java/Kotlin daemons (`GradleDaemon`, `GradleWorkerMain`, and `KotlinCompileDaemon`) during your CI builds.
-
-It tracks heap and RSS usage over time and generates a detailed log and optional SVG chart. Perfect for debugging OOM kills, analyzing memory trends, or identifying runaway daemons.
+Monitor memory usage of Java/Kotlin build processes (`GradleDaemon`, `GradleWorkerMain`, `KotlinCompileDaemon`) during CI builds. Track heap and RSS usage, generate charts, and visualize data in real-time dashboards.
 
 ---
 
-## ✨ Quick Start (One-liner)
+## ✨ Quick Start
 
-Use this if you want a clean setup:
-
-```yaml
-- uses: cdsap/build-process-watcher@v0.2
-```
-✅ Automatically starts memory monitoring and runs cleanup at the end  
-⚠️ Cleanup won't run if the job is killed by OOM or cancellation before the action step starts
-
-## 🛠️ Manual Mode (Debug / Safe Cleanup)
-Use this if you want guaranteed cleanup, even if the build fails:
+### Local Mode (Artifacts Only)
 
 ```yaml
-steps:
-  - uses: cdsap/build-process-watcher/start@v0.2
-    with:
-      interval: 5
-
-  - run: ./gradlew build
-
-  - uses: cdsap/build-process-watcher/cleanup@v0.2
-    if: always()
+- uses: cdsap/build-process-watcher@main
+  with:
+    remote_monitoring: 'false'
 ```
-✅ More verbose  
-✅ Ensures cleanup runs at the end of the job (unless the entire runner crashes)
 
-## 📥 Inputs
-* `interval`: Polling interval in seconds (default 5s)
+Generates log files and charts as workflow artifacts.
 
-## 📦 Output
-* java_mem_monitor.log: raw memory data (RSS + heap)
+### Remote Mode (Live Dashboard)
 
-* memory_usage.svg: optional SVG memory chart
+```yaml
+- uses: cdsap/build-process-watcher@main
+  with:
+    remote_monitoring: 'true'
+    debug: 'true'
+```
 
-* GitHub Actions job summary (Mermaid chart + per-process stats)
+Data sent to cloud backend with live dashboard (3-hour retention).  
+Dashboard URL shown in job output.
+
+---
+
+## 📋 Inputs
+
+| Input | Description | Default | Required |
+|-------|-------------|---------|----------|
+| `remote_monitoring` | Enable cloud dashboard | `false` | No |
+| `backend_url` | Custom backend URL | Default Cloud Run URL | No |
+| `run_id` | Custom run identifier | Auto-generated | No |
+| `log_file` | Local log filename | `build_process_watcher.log` | No |
+| `interval` | Polling interval (seconds) | `5` | No |
+| `debug` | Enable debug logging | `false` | No |
+
+---
+
+## 📊 Outputs
+
+### Local Mode
+- `build_process_watcher.log` - Raw memory data
+- `memory_usage.svg` - SVG chart
+- GitHub Actions job summary with Mermaid chart
+
+### Remote Mode
+- Live dashboard URL (in job output)
+- Data retention: 3 hours
+- Real-time process monitoring
+
+---
+
+## 📸 Screenshots
+
+### Interactive Dashboard
+![SVG Chart Example](frontend/public/svg-chart-example.png)
+
+The dashboard shows:
+- Memory usage over time for all monitored processes
+- Individual process metrics (RSS, Heap Used, Heap Capacity)
+- Aggregated memory consumption
+- Interactive charts with Plotly.js
+
+### GitHub Actions Summary
+![Mermaid Diagram Example](frontend/public/mermaid-diagram-example.png)
+
+The job summary includes:
+- Mermaid flowchart showing process memory progression
+- Per-process statistics (max, average, final measurements)
+- Timeline of monitoring session
+
+---
+
+## 🏗️ Architecture
+
+- **Frontend**: Firebase Hosting (static dashboard)
+- **Backend**: Google Cloud Run (Go API)
+- **Database**: Firestore (3-hour TTL)
+
+---
+
+## 📝 License
+
+MIT
