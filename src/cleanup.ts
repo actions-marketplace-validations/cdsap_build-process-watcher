@@ -409,7 +409,11 @@ async function run() {
 
         // Upload artifacts (only if files exist)
         const artifactClient = new DefaultArtifactClient();
-        const artifactName = `build_process_watcher-${process.env.GITHUB_JOB || 'default'}`;
+        // Create unique artifact name using job ID and run attempt to avoid conflicts
+        const jobId = process.env.GITHUB_JOB || 'default';
+        const runAttempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+        const timestamp = Date.now();
+        const artifactName = `build_process_watcher-${jobId}-${runAttempt}-${timestamp}`;
         const files = [];
         
         // Only include files that exist

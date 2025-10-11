@@ -1,0 +1,111 @@
+name: Test Action Build
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'build.sh'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'action.yaml'
+      - '.github/workflows/test-action.yml'
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'build.sh'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'action.yaml'
+      - '.github/workflows/test-action.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Action
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: |
+        echo "📦 Installing npm dependencies..."
+        npm ci
+
+    - name: Build TypeScript action
+      run: |
+        echo "🔨 Building TypeScript action..."
+        npm run build
+
+    - name: Verify build outputs
+      run: |
+        echo "✅ Verifying build outputs..."
+        if [ ! -f "dist/index_with_backend.js" ]; then
+          echo "❌ ERROR: dist/index_with_backend.js not found!"
+          exit 1
+        fi
+        echo "✅ dist/index_with_backend.js exists"
+        
+        if [ ! -f "dist/cleanup.js" ]; then
+          echo "❌ ERROR: dist/cleanup.js not found!"
+          exit 1
+        fi
+        echo "✅ dist/cleanup.js exists"
+        
+        if [ ! -f "monitor_with_backend.sh" ]; then
+          echo "❌ ERROR: monitor_with_backend.sh not found!"
+          exit 1
+        fi
+        echo "✅ monitor_with_backend.sh exists"
+        
+        # Check if we can make it executable (the action will do this at runtime)
+        chmod +x monitor_with_backend.sh
+        if [ -x "monitor_with_backend.sh" ]; then
+          echo "✅ monitor_with_backend.sh can be made executable"
+        else
+          echo "❌ ERROR: Cannot make monitor_with_backend.sh executable!"
+          exit 1
+        fi
+        
+        echo "✅ All required files present and valid"
+
+    - name: Check action metadata
+      run: |
+        echo "📋 Validating action.yaml..."
+        if [ ! -f "action.yaml" ]; then
+          echo "❌ ERROR: action.yaml not found!"
+          exit 1
+        fi
+        echo "✅ action.yaml found"
+
+    - name: TypeScript type check
+      run: |
+        echo "🔍 Running TypeScript type check..."
+        npx tsc --noEmit
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: action-dist
+        path: |
+          dist/
+          monitor_with_backend.sh
+        retention-days: 7
+
+    - name: Build summary
+      run: |
+        echo "✅ Action build completed successfully!"
+        echo "📦 Built files:"
+        ls -lh dist/
+

@@ -1,0 +1,45 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'frontend/**' ]
+  workflow_dispatch:
+
+jobs:
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    env:
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Inject config
+      env:
+        BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+      run: |
+        BE_URL=${BACKEND_URL}
+        FE_URL=${FRONTEND_URL}
+        echo "window.BUILD_PROCESS_WATCHER_CONFIG = {" > frontend/public/config.js
+        echo "  backendUrl: '${BE_URL}'," >> frontend/public/config.js
+        echo "  frontendUrl: '${FE_URL}'" >> frontend/public/config.js
+        echo "};" >> frontend/public/config.js
+
+    - name: Deploy to Firebase Hosting
+      uses: FirebaseExtended/action-hosting-deploy@v0
+      with:
+        repoToken: ${{ secrets.GITHUB_TOKEN }}
+        firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
+        entryPoint: ./frontend
+        channelId: live
+
+
+    - name: Output deployment URL
+      run: |
+        echo "🌐 Frontend deployed successfully!"
+        echo "🔗 Frontend URL: ${FRONTEND_URL}"
