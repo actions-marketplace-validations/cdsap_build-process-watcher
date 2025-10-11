@@ -36,6 +36,10 @@ outputs:
   frontend_url:
     description: 'The frontend dashboard URL for viewing results (only available when remote monitoring is enabled)'
 
+branding:
+  icon: "activity"
+  color: "gray-dark"
+
 runs:
   using: 'node20'
   main: 'dist/index_with_backend.js'
