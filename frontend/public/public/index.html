@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Build Process Watcher</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <style>
+        * {
+            box-sizing: border-box;
+            padding: 0;
+            margin: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            background: #f8fafc;
+            color: #334155;
+            line-height: 1.6;
+            min-height: 100vh;
+            position: relative;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 25% 25%, rgba(59, 130, 246, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 75% 75%, rgba(139, 92, 246, 0.05) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            padding: 1rem 0;
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #1e293b;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+
+        .hero {
+            text-align: center;
+            margin-bottom: 4rem;
+            padding: 3rem 0;
+        }
+
+        .hero h2 {
+            font-size: 3rem;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 1.5rem;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: #64748b;
+            max-width: 40rem;
+            margin: 0 auto 2rem;
+        }
+
+        .free-service-banner {
+            background: linear-gradient(45deg, #f59e0b, #f97316);
+            color: white;
+            padding: 1rem 2rem;
+            border-radius: 1rem;
+            margin: 2rem auto;
+            max-width: 600px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border: 2px solid rgba(255,255,255,0.2);
+        }
+
+        .free-service-banner h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .free-service-banner p {
+            font-size: 1rem;
+            opacity: 0.95;
+            margin: 0;
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 1rem;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            transition: all 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+            border-color: #cbd5e1;
+        }
+
+        .card h3 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1e293b;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card h3::before {
+            content: "📊";
+            font-size: 1.25rem;
+        }
+
+        .steps {
+            list-style: none;
+            padding: 0;
+        }
+
+        .steps li {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: rgba(59, 130, 246, 0.1);
+            border-radius: 0.75rem;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .step-number {
+            flex-shrink: 0;
+            width: 2rem;
+            height: 2rem;
+            background: #3b82f6;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-right: 1rem;
+            box-shadow: 0 2px 4px rgba(59, 130, 246, 0.2);
+        }
+
+
+        .example {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 1rem;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+
+        .example h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .example h3::before {
+            content: "💡";
+            font-size: 1.125rem;
+        }
+
+        .code {
+            background: linear-gradient(45deg, #1f2937, #374151);
+            color: #f9fafb;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', 'Source Code Pro', monospace;
+            font-size: 0.875rem;
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .feature-card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 1.2rem;
+            padding: 2rem;
+            box-shadow: 
+                0 8px 32px rgba(0,0,0,0.1),
+                inset 0 1px 0 rgba(255,255,255,0.1);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%, rgba(255,255,255,0.05) 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .feature-card:hover::after {
+            opacity: 1;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 
+                0 20px 60px rgba(0,0,0,0.2),
+                inset 0 1px 0 rgba(255,255,255,0.2);
+            border-color: rgba(255,255,255,0.3);
+        }
+
+        .feature-card h3 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .feature-card h3::before {
+            content: "✨";
+            font-size: 1.125rem;
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .feature-list li {
+            color: #4b5563;
+            margin-bottom: 0.75rem;
+            padding-left: 1.5rem;
+            position: relative;
+        }
+
+        .feature-list li::before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #10b981;
+            font-weight: bold;
+        }
+
+        .cta {
+            text-align: center;
+            margin-top: 3rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.75rem 1.5rem;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            font-size: 1rem;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(59, 130, 246, 0.2);
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn:hover {
+            background: #2563eb;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+
+        .btn-secondary {
+            background: #6b7280;
+            margin-left: 1rem;
+            box-shadow: 0 2px 4px rgba(107, 114, 128, 0.2);
+        }
+
+        .btn-secondary:hover {
+            background: #4b5563;
+        }
+
+
+        .footer {
+            text-align: center;
+            margin-top: 4rem;
+            padding: 2rem 0;
+            border-top: 1px solid #e2e8f0;
+            color: #64748b;
+            font-size: 0.875rem;
+            background: #f8fafc;
+        }
+
+        pre {
+            background: #1f2937;
+            color: #f9fafb;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            margin-top: 1rem;
+            font-size: 0.875rem;
+            border: 1px solid #374151;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        @media (max-width: 768px) {
+            .features {
+                grid-template-columns: 1fr;
+            }
+            
+            .hero h2 {
+                font-size: 2.5rem;
+            }
+            
+            .btn-secondary {
+                margin-left: 0;
+                margin-top: 1rem;
+                display: block;
+            }
+
+            .card {
+                padding: 1.5rem;
+            }
+
+            .hero {
+                padding: 2rem 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Build Process Watcher</h1>
+        </header>
+
+        <div class="hero">
+            <p>Monitor memory usage and performance of your Gradle build processes in real-time with our GitHub Action.</p>
+        </div>
+        <div class="features">
+            <div class="feature-card">
+                <h3>Default Mode Setup</h3>
+                <p>Generate Mermaid diagrams and SVG charts locally, at the end of the build:</p>
+                <pre><code>- name: Build Process Monitoring
+  uses: cdsap/build-process-watcher@0.3.0
+ 
+- name: Build project
+  run: ./gradlew clean build
+</code></pre>
+                <p style="margin-top: 1rem; font-size: 0.875rem; color: #6b7280;">
+                    <strong>Output:</strong> Check GitHub Actions artifacts for Mermaid diagrams, SVG charts, and log files
+                </p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>Remote Mode Setup</h3>
+                <p>Enable live dashboard with real-time monitoring:</p>
+                <pre><code>- name: Build Process Monitoring
+  uses: cdsap/build-process-watcher@0.3.0
+  with:
+    remote_monitoring: 'true'
+    
+- name: Build project
+  run: ./gradlew clean build
+
+</code></pre>
+                <p style="margin-top: 1rem; font-size: 0.875rem; color: #6b7280;">
+                    <strong>Output:</strong> Dashboard URL will be displayed in the action output (data available for 3 hours)
+                </p>
+            </div>
+            </div>
+
+
+
+        <div class="card">
+            <h3>Two Monitoring Modes</h3>
+            
+            <div style="margin-bottom: 2rem;">
+                <h4 style="color: #1f2937; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    📊 <span>Default Mode - Local Analysis</span>
+                </h4>
+                <p style="margin-bottom: 1rem; color: #4b5563;">Generates Mermaid diagrams and SVG charts with build process information. Data is stored locally and uploaded as GitHub Actions artifacts.</p>
+                <div style="background: rgba(59, 130, 246, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #3b82f6;">
+                    <strong>Output:</strong> Mermaid diagrams, SVG charts, and log files in GitHub Actions artifacts
+                </div>
+            </div>
+
+            <div>
+                <h4 style="color: #1f2937; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    🌐 <span>Remote Mode - Live Dashboard</span>
+                </h4>
+                <p style="margin-bottom: 1rem; color: #4b5563;">Check the current state of processes in real-time through our web dashboard. Data is stored in the cloud with 3-hour retention.</p>
+                <div style="background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #10b981;">
+                    <strong>Output:</strong> Live dashboard URL with real-time monitoring data (available for 3 hours)
+                </div>
+            </div>
+        </div>
+
+        <div class="example">
+            <h3>Live Example Dashboard:</h3>
+            <p>View a real Gradle build monitoring dashboard with live data:</p>
+            <p style="margin: 1rem 0;">
+                <a href="https://process-watcher.web.app/runs/demo.html" class="btn" style="display: inline-block;">🔗 Open Live Example Dashboard</a>
+            </p>
+            <p style="font-size: 0.9rem; opacity: 0.8; margin-top: 0.5rem;">Real data from run 18236843825 - 311 samples from GradleDaemon & KotlinCompileDaemon</p>
+            <p style="font-size: 0.9rem; opacity: 0.8; margin-top: 0.5rem; color: #f59e0b;"><strong>Note:</strong> This example demonstrates the Remote Mode dashboard with 3-hour data retention</p>
+        </div>
+
+        <div class="card">
+            <h3>Default Mode Output Examples</h3>
+            <p style="margin-bottom: 1.5rem; color: #4b5563;">When using Default Mode, you'll get these outputs in your GitHub Actions artifacts:</p>
+            
+            <div style="margin-bottom: 2rem;">
+                <h4 style="color: #1f2937; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    📊 <span>Mermaid Diagram</span>
+                </h4>
+                <p style="margin-bottom: 1rem; color: #4b5563; font-size: 0.9rem;">Interactive flowchart showing memory usage over time with process details</p>
+                
+                <div style="background: rgba(59, 130, 246, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #3b82f6; font-size: 0.875rem; margin-bottom: 1rem;">
+                    <strong>File:</strong> <code>memory_usage.mermaid</code> - Can be rendered in GitHub, GitLab, or any Mermaid-compatible viewer
+                </div>
+
+                <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 0.5rem; padding: 1rem; text-align: center;">
+                    <img src="/mermaid-diagram-example.png" alt="Mermaid Diagram Example" style="max-width: 100%; height: auto; border-radius: 0.25rem;">
+                    <p style="margin-top: 0.5rem; font-size: 0.75rem; color: #666;">Example: Memory usage flowchart with process details</p>
+                </div>
+            </div>
+
+            <div>
+                <h4 style="color: #1f2937; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    📈 <span>SVG Chart</span>
+                </h4>
+                <p style="margin-bottom: 1rem; color: #4b5563; font-size: 0.9rem;">High-quality vector chart showing RSS and Heap usage with process-specific colors</p>
+                
+                <div style="background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #10b981; font-size: 0.875rem; margin-bottom: 1rem;">
+                    <strong>File:</strong> <code>memory_usage.svg</code> - Scalable vector graphics perfect for documentation and reports
+                </div>
+
+                <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 0.5rem; padding: 1rem; text-align: center;">
+                    <img src="/svg-chart-example.png" alt="SVG Chart Example" style="max-width: 100%; height: auto; border-radius: 0.25rem;">
+                    <p style="margin-top: 0.5rem; font-size: 0.75rem; color: #666;">Example: RSS and Heap usage chart with process-specific colors</p>
+                </div>
+            </div>
+        </div>
+
+
+
+        <div class="cta">
+            <a href="https://process-watcher.web.app/runs/demo.html" class="btn">View Example Dashboard with remote monitoring</a>
+            <a href="https://github.com/cdsap/build-process-watcher" class="btn btn-secondary">View on GitHub</a>
+        </div>
+
+        <div class="footer">
+            <p>🚀 Build Process Watcher - Free service with 3-hour memory report availability</p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem; opacity: 0.8;">Keep this service free by accessing your data within 3 hours</p>
+        </div>
+    </div>
+
+    <script src="/config.js"></script>
+    <script>
+        // Simple client-side routing for dynamic run pages
+        if (window.location.pathname.startsWith('/runs/')) {
+            const runId = window.location.pathname.split('/runs/')[1];
+            if (runId && runId !== 'demo') {
+                // Redirect to the actual dashboard - use the backend URL to construct the frontend URL
+                const backendUrl = window.BUILD_PROCESS_WATCHER_CONFIG?.backendUrl || 'https://build-process-watcher-backend-685615422311.us-central1.run.app';
+                const frontendUrl = `https://process-watcher.web.app/runs/${runId}`;
+                
+                // Check if the run exists by trying to fetch data
+                fetch(`${backendUrl}/runs/${runId}`)
+                    .then(response => {
+                        if (response.ok) {
+                            // Run exists, redirect to the dashboard
+                            window.location.href = frontendUrl;
+                        } else {
+                            // Run doesn't exist, show 404 message
+                            document.body.innerHTML = `
+                                <div style="text-align: center; padding: 2rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+                                    <h1>Run Not Found</h1>
+                                    <p>The build run with ID <code>${runId}</code> could not be found.</p>
+                                    <p>This might be because:</p>
+                                    <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
+                                        <li>The memory report has expired (available for 3 hours)</li>
+                                        <li>The run ID is incorrect</li>
+                                        <li>The build is still in progress</li>
+                                    </ul>
+                                    <a href="/" style="display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; background: #2563eb; color: white; text-decoration: none; border-radius: 0.25rem;">Back to Home</a>
+                                </div>
+                            `;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error checking run:', error);
+                        // On error, show 404 message
+                        document.body.innerHTML = `
+                            <div style="text-align: center; padding: 2rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+                                <h1>Service Unavailable</h1>
+                                <p>Unable to check if the run exists. The service might be temporarily unavailable.</p>
+                                <a href="/" style="display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; background: #2563eb; color: white; text-decoration: none; border-radius: 0.25rem;">Back to Home</a>
+                            </div>
+                        `;
+                    });
+            }
+        }
+    </script>
+</body>
+</html>

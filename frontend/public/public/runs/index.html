@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Run Not Found - Build Process Watcher</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            padding: 0;
+            margin: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            background: #fff;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            border-bottom: 1px solid #e5e7eb;
+            padding: 1rem 0;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #111827;
+        }
+
+        .error-page {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .error-code {
+            font-size: 6rem;
+            font-weight: 700;
+            color: #9ca3af;
+            margin-bottom: 1rem;
+        }
+
+        .error-title {
+            font-size: 3rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 1rem;
+        }
+
+        .error-description {
+            font-size: 1.125rem;
+            color: #4b5563;
+            max-width: 32rem;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #111827;
+            margin-bottom: 1.5rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.75rem 1.5rem;
+            background: #2563eb;
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            transition: background-color 0.2s;
+            margin: 0.5rem;
+        }
+
+        .btn:hover {
+            background: #1d4ed8;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+        }
+
+        .btn-secondary:hover {
+            background: #4b5563;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid #e5e7eb;
+            color: #6b7280;
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Build Process Watcher</h1>
+        </header>
+
+        <div class="error-page">
+            <div class="error-code">404</div>
+            <h2 class="error-title">Run Not Found</h2>
+            <p class="error-description">
+                The memory report you're looking for could not be found or has been removed due to our 3-hour availability policy.
+            </p>
+        </div>
+
+        <div class="card">
+            <h3>📊 About This Service</h3>
+            <p><strong>Build Process Watcher</strong> is a <strong>free service</strong> that monitors Java build processes in real-time.</p>
+            <p>To keep this service affordable and accessible to everyone, <strong>memory reports are available for 3 hours</strong>.</p>
+        </div>
+
+        <div class="card">
+            <h3>💡 What You Can Do</h3>
+            <p>For current builds:</p>
+            <ul>
+                <li>Check if the build is still running</li>
+                <li>Wait a few minutes and refresh</li>
+                <li>Verify the run ID is correct</li>
+            </ul>
+            <p>For future builds:</p>
+            <ul>
+                <li>Access memory reports within 3 hours</li>
+                <li>Use the data for immediate analysis</li>
+                <li>Export charts and metrics</li>
+            </ul>
+        </div>
+
+        <div style="text-align: center;">
+            <a href="/" class="btn">Back to Home</a>
+            <a href="https://process-watcher.web.app/runs/abc123" class="btn btn-secondary">View Example Dashboard</a>
+        </div>
+
+        <div class="footer">
+            <p>💡 Remember: This is a free service. Memory reports are available for 3 hours to keep it affordable for everyone.</p>
+        </div>
+    </div>
+
+    <script>
+        // Redirect to actual dashboard if available
+        const runId = window.location.pathname.split('/runs/')[1];
+        if (runId && runId !== 'abc123') {
+            // Try to load the actual dashboard
+            fetch(`https://build-process-watcher-backend-685615422311.us-central1.run.app/runs/${runId}`)
+                .then(response => {
+                    if (response.ok) {
+                        // If data exists, redirect to the real dashboard
+                        window.location.href = `https://build-process-watcher-frontend.web.app/runs/${runId}`;
+                    }
+                })
+                .catch(error => {
+                    console.log('Run not found or service unavailable');
+                });
+        }
+    </script>
+</body>
+</html>
