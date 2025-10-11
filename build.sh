@@ -6,9 +6,11 @@ set -xe  # Exit immediately on error, print commands as they run
 rm -rf dist
 mkdir -p dist
 
-# Build src/index_with_backend.ts -> dist/index.js
+# Build src/index_with_backend.ts -> dist/index_with_backend.js
 echo "Building src/index_with_backend.ts..."
-npx ncc build src/index_with_backend.ts -o dist || { echo "❌ Failed to build src/index_with_backend.ts"; exit 1; }
+npx ncc build src/index_with_backend.ts -o dist-main || { echo "❌ Failed to build src/index_with_backend.ts"; exit 1; }
+mv dist-main/index.js dist/index_with_backend.js || { echo "❌ dist-main/index.js not found"; exit 1; }
+rm -rf dist-main
 
 # Build src/cleanup.ts -> dist/cleanup.js
 echo "Building src/cleanup.ts..."
