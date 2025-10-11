@@ -1,0 +1,81 @@
+name: Backend Tests
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/test-backend.yml'
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/test-backend.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Go Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache: true
+        cache-dependency-path: backend/go.sum
+
+    - name: Install dependencies
+      working-directory: ./backend
+      run: |
+        echo "📦 Installing Go dependencies..."
+        go mod download
+        go mod verify
+
+    - name: Run unit tests
+      working-directory: ./backend
+      run: |
+        echo "🧪 Running unit tests..."
+        make test
+
+    - name: Run tests with coverage
+      working-directory: ./backend
+      run: |
+        echo "📊 Running tests with coverage..."
+        make test-coverage
+
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: backend/coverage.html
+        retention-days: 30
+
+    - name: Run integration tests
+      working-directory: ./backend
+      run: |
+        echo "🔗 Running integration tests..."
+        make test-integration
+
+    - name: Run benchmarks
+      working-directory: ./backend
+      run: |
+        echo "⚡ Running performance benchmarks..."
+        make benchmark
+
+    - name: Check for race conditions
+      working-directory: ./backend
+      run: |
+        echo "🔍 Checking for race conditions..."
+        go test -race ./...
+
+    - name: Test summary
+      if: always()
+      run: |
+        echo "✅ Test execution completed!"
+        echo "Check the artifacts for detailed coverage report."
+

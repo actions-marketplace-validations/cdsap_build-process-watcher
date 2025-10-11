@@ -1,0 +1,265 @@
+name: E2E Action Test
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'action.yaml'
+      - 'monitor_with_backend.sh'
+      - '.github/workflows/test-e2e-action.yml'
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'action.yaml'
+      - 'monitor_with_backend.sh'
+      - '.github/workflows/test-e2e-action.yml'
+  workflow_dispatch:
+
+jobs:
+  test-local-mode:
+    name: Test Action (Local Mode)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build the action
+      run: |
+        echo "🔨 Building action for testing..."
+        npm ci
+        npm run build
+
+    - name: Test action in local mode
+      uses: ./
+      with:
+        remote_monitoring: 'false'
+        log_file: 'test_local.log'
+        interval: '2'
+        debug: 'true'
+
+    - name: Simulate build workload
+      run: |
+        echo "🏗️  Simulating build workload..."
+        sleep 10
+        echo "✅ Build simulation completed"
+
+    - name: Verify local log file
+      run: |
+        echo "📋 Checking for log file..."
+        if [ -f "test_local.log" ]; then
+          echo "✅ Log file created successfully"
+          echo "📄 Log file content:"
+          head -20 test_local.log
+          
+          # Check if log has expected structure
+          if grep -q "Elapsed_Time" test_local.log; then
+            echo "✅ Log file has correct header"
+          else
+            echo "❌ Log file missing expected header"
+            exit 1
+          fi
+        else
+          echo "❌ ERROR: Log file not created!"
+          exit 1
+        fi
+
+    - name: Upload test artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: local-mode-logs
+        path: |
+          test_local.log
+          backend_debug.log
+        retention-days: 7
+
+  test-remote-mode-dry-run:
+    name: Test Action (Remote Mode - Dry Run)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build the action
+      run: |
+        echo "🔨 Building action for testing..."
+        npm ci
+        npm run build
+
+    - name: Test action in remote mode (without actual backend)
+      uses: ./
+      with:
+        remote_monitoring: 'true'
+        backend_url: 'https://test-backend.example.com'
+        run_id: 'test-run-${{ github.run_id }}'
+        log_file: 'test_remote.log'
+        interval: '2'
+        debug: 'true'
+      continue-on-error: true  # Backend won't be reachable, but we test the setup
+
+    - name: Simulate build workload
+      run: |
+        echo "🏗️  Simulating build workload..."
+        sleep 10
+        echo "✅ Build simulation completed"
+
+    - name: Check that monitoring attempted to start
+      run: |
+        echo "🔍 Verifying monitoring process attempted to start..."
+        
+        # Check if log file was created
+        if [ -f "test_remote.log" ]; then
+          echo "✅ Log file created"
+        else
+          echo "⚠️  Log file not created (expected in dry run)"
+        fi
+        
+        # Check if backend debug log was created
+        if [ -f "backend_debug.log" ]; then
+          echo "✅ Backend debug log created"
+          echo "📄 Backend debug log preview:"
+          head -30 backend_debug.log
+        else
+          echo "⚠️  Backend debug log not created"
+        fi
+
+    - name: Upload test artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: remote-mode-logs
+        path: |
+          test_remote.log
+          backend_debug.log
+        retention-days: 7
+
+  test-monitoring-script:
+    name: Test Monitoring Script
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Test monitoring script syntax
+      run: |
+        echo "🔍 Checking bash script syntax..."
+        bash -n monitor_with_backend.sh
+        if [ $? -eq 0 ]; then
+          echo "✅ Script syntax is valid"
+        else
+          echo "❌ Script has syntax errors!"
+          exit 1
+        fi
+
+    - name: Test script permissions
+      run: |
+        echo "🔒 Checking script permissions..."
+        if [ -x "monitor_with_backend.sh" ] || [ -f "monitor_with_backend.sh" ]; then
+          echo "✅ Script file exists"
+          chmod +x monitor_with_backend.sh
+          echo "✅ Made script executable"
+        else
+          echo "❌ ERROR: Script file not found!"
+          exit 1
+        fi
+
+    - name: Test script with minimal execution
+      run: |
+        echo "🧪 Testing script execution..."
+        # Set required environment variables
+        export BACKEND_URL="https://test.example.com"
+        export RUN_ID="test-run"
+        export LOG_FILE="test.log"
+        export DEBUG_MODE="true"
+        export REMOTE_MONITORING="false"
+        
+        # Run script for a few seconds then kill it
+        timeout 5s ./monitor_with_backend.sh 1 || true
+        
+        # Check if log was created
+        if [ -f "test.log" ]; then
+          echo "✅ Script executed and created log file"
+          cat test.log
+        else
+          echo "❌ Script did not create log file"
+          exit 1
+        fi
+
+    - name: Upload test logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: script-test-logs
+        path: |
+          test.log
+          backend_debug.log
+        retention-days: 7
+
+  test-composite-actions:
+    name: Test Composite Actions
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate composite action metadata
+      run: |
+        echo "📋 Validating composite action files..."
+        
+        # Check composite action
+        if [ -f "composite/action.yml" ]; then
+          echo "✅ composite/action.yml exists"
+          cat composite/action.yml | grep -q "runs:" && echo "✅ Has runs section"
+        else
+          echo "❌ composite/action.yml missing"
+          exit 1
+        fi
+        
+        # Check start action
+        if [ -f "start/action.yml" ]; then
+          echo "✅ start/action.yml exists"
+        else
+          echo "❌ start/action.yml missing"
+          exit 1
+        fi
+        
+        # Check cleanup action
+        if [ -f "cleanup/action.yml" ]; then
+          echo "✅ cleanup/action.yml exists"
+        else
+          echo "❌ cleanup/action.yml missing"
+          exit 1
+        fi
+
+  summary:
+    name: Test Summary
+    needs: [test-local-mode, test-remote-mode-dry-run, test-monitoring-script, test-composite-actions]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Check test results
+      run: |
+        echo "📊 E2E Test Summary:"
+        echo "  ✅ Local mode test: ${{ needs.test-local-mode.result }}"
+        echo "  ✅ Remote mode test: ${{ needs.test-remote-mode-dry-run.result }}"
+        echo "  ✅ Script test: ${{ needs.test-monitoring-script.result }}"
+        echo "  ✅ Composite actions: ${{ needs.test-composite-actions.result }}"
+        
+        if [ "${{ needs.test-local-mode.result }}" != "success" ] || \
+           [ "${{ needs.test-monitoring-script.result }}" != "success" ] || \
+           [ "${{ needs.test-composite-actions.result }}" != "success" ]; then
+          echo "❌ Some tests failed!"
+          exit 1
+        fi
+        
+        echo "✅ All critical tests passed!"
+

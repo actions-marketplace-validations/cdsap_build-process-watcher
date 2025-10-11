@@ -1,0 +1,62 @@
+name: CI Tests
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  backend-tests:
+    name: 🧪 Backend Tests
+    uses: ./.github/workflows/test-backend.yml
+
+  action-build:
+    name: 🔨 Action Build
+    uses: ./.github/workflows/test-action.yml
+
+  frontend-validation:
+    name: 🌐 Frontend Validation
+    uses: ./.github/workflows/test-frontend.yml
+
+  e2e-tests:
+    name: 🚀 E2E Tests
+    uses: ./.github/workflows/test-e2e-action.yml
+
+  all-tests-summary:
+    name: 📊 Test Summary
+    needs: [backend-tests, action-build, frontend-validation, e2e-tests]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Generate test report
+      run: |
+        echo "# 📊 CI Test Results Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Backend Tests | ${{ needs.backend-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Action Build | ${{ needs.action-build.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Frontend Validation | ${{ needs.frontend-validation.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| E2E Tests | ${{ needs.e2e-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        cat $GITHUB_STEP_SUMMARY
+        
+        # Determine overall status
+        if [ "${{ needs.backend-tests.result }}" != "success" ] || \
+           [ "${{ needs.action-build.result }}" != "success" ] || \
+           [ "${{ needs.frontend-validation.result }}" != "success" ] || \
+           [ "${{ needs.e2e-tests.result }}" != "success" ]; then
+          echo "❌ Some tests failed - PR should not be merged"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **Some tests failed. Please review the failures above.**" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        else
+          echo "✅ All tests passed - PR is ready to merge!"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **All tests passed! PR is ready for review.**" >> $GITHUB_STEP_SUMMARY
+        fi
+
