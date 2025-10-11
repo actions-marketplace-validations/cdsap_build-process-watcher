@@ -1,18 +1,42 @@
-name: "Build Process Watcher"
-description: "Tracks memory usage of build processes during the job"
+name: 'Build Process Watcher'
+description: 'Monitor Java build processes with optional backend integration'
+author: 'cdsap'
 
 inputs:
-  interval:
-    description: "Polling interval in seconds"
+  backend_url:
+    description: 'Backend URL for data ingestion (optional - defaults to Cloud Run URL when remote_monitoring is enabled)'
     required: false
-    default: "5"
+  remote_monitoring:
+    description: 'Enable remote monitoring with cloud dashboard (will use default Cloud Run URL if backend_url not provided)'
+    required: false
+    default: 'false'
+  run_id:
+    description: 'Unique run identifier'
+    required: false
+  log_file:
+    description: 'Log file name for local monitoring'
+    required: false
+    default: 'build_process_watcher.log'
+  interval:
+    description: 'Monitoring interval in seconds'
+    required: false
+    default: '5'
+  debug:
+    description: 'Enable debug mode for detailed logging'
+    required: false
+    default: 'false'
+
+outputs:
+  run_id:
+    description: 'The unique run identifier for this monitoring session'
+  backend_url:
+    description: 'The backend URL used for data ingestion (empty if remote monitoring disabled)'
+  remote_monitoring:
+    description: 'Whether remote monitoring was enabled'
+  frontend_url:
+    description: 'The frontend dashboard URL for viewing results (only available when remote monitoring is enabled)'
 
 runs:
-  using: "node20"
-  main: "dist/index.js"
-  post: "dist/cleanup.js"
-
-# Optional if you're publishing this to the Marketplace
-branding:
-  icon: "activity"
-  color: "gray-dark"
+  using: 'node20'
+  main: 'dist/index_with_backend.js'
+  post: 'dist/cleanup.js'

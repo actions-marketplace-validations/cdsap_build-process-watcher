@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DefaultArtifactClient } from '@actions/artifact';
 import * as core from '@actions/core';
+import { initializeApp, cert } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 
 const execAsync = promisify(exec);
 
@@ -223,20 +225,180 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
     return svg;
 }
 
+async function markProcessAsFinished(runId: string): Promise<void> {
+    try {
+        const backendUrl = process.env.BACKEND_URL;
+        
+        if (backendUrl) {
+            // Use backend API to mark as finished
+            console.log(`🏁 Marking run ${runId} as finished via backend API...`);
+            
+            // Get JWT token for this run
+            console.log(`🔐 Requesting JWT token for run ${runId}...`);
+            const authResponse = await fetch(`${backendUrl}/auth/run/${runId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            });
+            
+            if (!authResponse.ok) {
+                console.error(`❌ Failed to get JWT token: ${authResponse.status} ${authResponse.statusText}`);
+                await markProcessAsFinishedDirect(runId);
+                return;
+            }
+            
+            const authData = await authResponse.json();
+            const token = authData.token;
+            console.log(`✅ JWT token obtained for run ${runId}`);
+            
+            // Call finish endpoint with JWT token
+            const response = await fetch(`${backendUrl}/finish/${runId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                },
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                console.log(`✅ Successfully marked run ${runId} as finished via backend:`, result.message);
+            } else {
+                console.error(`❌ Backend API failed to mark run as finished: ${response.status} ${response.statusText}`);
+                // Fall back to direct Firestore update
+                await markProcessAsFinishedDirect(runId);
+            }
+        } else {
+            // Fall back to direct Firestore update
+            await markProcessAsFinishedDirect(runId);
+        }
+    } catch (error) {
+        console.error('❌ Error marking process as finished:', error);
+        // Don't throw error - this is not critical for the cleanup process
+    }
+}
+
+async function markProcessAsFinishedDirect(runId: string): Promise<void> {
+    try {
+        // Initialize Firebase Admin SDK
+        const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './test-key-new.json';
+        const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'process-watcher-68e14';
+        
+        if (!fs.existsSync(serviceAccountPath)) {
+            console.log('⚠️  Service account key not found, skipping direct Firestore update');
+            return;
+        }
+
+        initializeApp({
+            credential: cert(serviceAccountPath),
+            projectId: projectId
+        });
+
+        const db = getFirestore();
+        const docRef = db.collection('runs').doc(runId);
+        
+        // Update the document to mark it as finished
+        await docRef.update({
+            finished: true,
+            finished_at: new Date(),
+            updated_at: new Date()
+        });
+        
+        console.log(`✅ Marked run ${runId} as finished in Firestore directly`);
+    } catch (error) {
+        console.error('❌ Error marking process as finished directly:', error);
+        // Don't throw error - this is not critical for the cleanup process
+    }
+}
+
 async function run() {
     try {
+        // Check debug mode from environment variable
+        const debugMode = process.env.DEBUG_MODE === 'true';
+        
         // Kill the monitor process if it's still running
         try {
             const pid = fs.readFileSync('monitor.pid', 'utf8').trim();
             process.kill(parseInt(pid));
-            console.log(`Killed monitor process with PID ${pid}`);
+            if (debugMode) {
+                console.log(`Killed monitor process with PID ${pid}`);
+            }
         } catch (error) {
-            console.log('No monitor process found to kill');
+            if (debugMode) {
+                console.log('No monitor process found to kill');
+            }
+        }
+
+        // Mark the process as finished in Firestore if we have a run ID
+        const runId = process.env.RUN_ID || process.env.GITHUB_RUN_ID;
+        if (runId) {
+            if (debugMode) {
+                console.log(`🏁 Marking run ${runId} as finished...`);
+            }
+            await markProcessAsFinished(runId);
+        } else {
+            if (debugMode) {
+                console.log('⚠️  No run ID found, skipping Firestore update');
+            }
+        }
+
+        // Print backend debug log if it exists (only in debug mode)
+        const actionDir = process.env.GITHUB_ACTION_PATH || __dirname;
+        const backendDebugLog = path.join(actionDir, '..', 'backend_debug.log');
+        if (fs.existsSync(backendDebugLog) && debugMode) {
+            console.log('\n🔍 Backend Debug Log:');
+            console.log('==========================================');
+            const debugContent = fs.readFileSync(backendDebugLog, 'utf8');
+            console.log(debugContent);
+            console.log('==========================================\n');
+        }
+
+        // Check if we have a log file
+        // The monitor script creates files in the action directory, not the project directory
+        const logFile = path.join(actionDir, '..', 'build_process_watcher.log');
+        const backendMode = process.env.ENABLE_BACKEND === 'true' || process.env.BACKEND_URL;
+        
+        if (debugMode) {
+            console.log(`🔍 Debug: Current working directory: ${process.cwd()}`);
+            console.log(`🔍 Debug: Looking for log file: ${logFile}`);
+            console.log(`🔍 Debug: Log file exists: ${fs.existsSync(logFile)}`);
+            console.log(`🔍 Debug: Backend mode: ${backendMode}`);
+            
+            // List all files in current directory
+            try {
+                const files = fs.readdirSync('.');
+                console.log(`🔍 Debug: Files in current directory: ${files.join(', ')}`);
+            } catch (err) {
+                console.log(`🔍 Debug: Error listing directory: ${err}`);
+            }
+        }
+        
+        if (!fs.existsSync(logFile)) {
+            if (backendMode) {
+                // Always show the dashboard URL for remote monitoring
+                const frontendUrl = `https://process-watcher.web.app/runs/${runId}`;
+                console.log(`🌐 Dashboard URL: ${frontendUrl}`);
+                
+                if (debugMode) {
+                    console.log('Backend mode detected - no local log file to process');
+                    console.log('Data has been sent to the backend and can be viewed at:');
+                    console.log(`- Frontend: ${frontendUrl}`);
+                    console.log(`- Backend API: ${process.env.BACKEND_URL || 'not configured'}`);
+                }
+            } else {
+                if (debugMode) {
+                    console.log('No log file found');
+                }
+            }
+            return;
         }
 
         // Parse log file
-        console.log('Generating memory usage graph...');
-        const { processes, timestamps } = parseLogFile('build_process_watcher.log');
+        if (debugMode) {
+            console.log('Generating memory usage graph...');
+        }
+        const { processes, timestamps } = parseLogFile(logFile);
         
         // Generate both charts
         const mermaidChart = generateMermaidChart(processes, timestamps);
@@ -245,28 +407,97 @@ async function run() {
         // Save SVG file
         fs.writeFileSync('memory_usage.svg', svgContent);
 
-        // Upload artifacts
+        // Upload artifacts (only if files exist)
         const artifactClient = new DefaultArtifactClient();
         const artifactName = `build_process_watcher-${process.env.GITHUB_JOB || 'default'}`;
-        const files = ['build_process_watcher.log', 'memory_usage.svg'];
-        const rootDirectory = '.';
+        const files = [];
+        
+        // Only include files that exist
+        if (fs.existsSync('build_process_watcher.log')) {
+            files.push('build_process_watcher.log');
+        }
+        if (fs.existsSync('memory_usage.svg')) {
+            files.push('memory_usage.svg');
+        }
+        if (fs.existsSync('backend_debug.log')) {
+            files.push('backend_debug.log');
+        }
+        
+        if (files.length > 0) {
+            if (debugMode) {
+                console.log('Uploading artifacts...');
+            }
+            await artifactClient.uploadArtifact(artifactName, files, '.');
+            if (debugMode) {
+                console.log('Successfully uploaded artifacts');
+            }
+        } else {
+            if (debugMode) {
+                console.log('No artifacts to upload');
+            }
+        }
 
-        console.log('Uploading artifacts...');
-        await artifactClient.uploadArtifact(artifactName, files, rootDirectory);
-        console.log('Successfully uploaded artifacts');
-
-        // Add to GitHub Actions summary
+        // Add to GitHub Actions summary (always generated)
         if (process.env.GITHUB_STEP_SUMMARY) {
             const summary = fs.readFileSync(process.env.GITHUB_STEP_SUMMARY, 'utf8');
 
-            // Calculate some statistics
-            const maxRss = Math.max(...Array.from(processes.values()).flatMap(p => p.rss));
-            const processCount = processes.size;
-            const duration = timestamps.length > 0 ?
-                `from ${timestamps[0]} to ${timestamps[timestamps.length - 1]}` :
-                'N/A';
+            if (backendMode && runId) {
+                // Remote monitoring mode - show dashboard info + Mermaid diagram if data available
+                const frontendUrl = `https://process-watcher.web.app/runs/${runId}`;
+                
+                let newSummary = `${summary}
 
-            const newSummary = `${summary}
+## Build Process Monitoring
+
+### Remote Monitoring Mode
+- **Dashboard URL**: ${frontendUrl} (**Data Retention**: 3 hours)
+`;
+
+                // Add Mermaid diagram if we have local data
+                if (fs.existsSync(logFile) && processes.size > 0) {
+                    const maxRss = Math.max(...Array.from(processes.values()).flatMap(p => p.rss));
+                    const processCount = processes.size;
+                    const duration = timestamps.length > 0 ?
+                        `from ${timestamps[0]} to ${timestamps[timestamps.length - 1]}` :
+                        'N/A';
+
+                    newSummary += `
+
+### Build Process Graph
+\`\`\`mermaid
+${mermaidChart}
+\`\`\`
+
+### Overview
+- Number of processes monitored: ${processCount}
+- Maximum RSS observed: ${maxRss.toFixed(2)} MB
+- Monitoring duration: ${duration}
+
+### Process Details
+${Array.from(processes.entries()).map(([key, data]) => {
+    const maxProcessRss = Math.max(...data.rss);
+    const avgProcessRss = data.rss.reduce((a, b) => a + b, 0) / data.rss.length;
+    const lastRss = data.rss[data.rss.length - 1];
+    return `#### ${key}
+- Maximum RSS: ${maxProcessRss.toFixed(2)} MB
+- Average RSS: ${avgProcessRss.toFixed(2)} MB
+- Number of measurements: ${data.rss.length}
+- Last measurement: ${lastRss.toFixed(2)} MB`;
+}).join('\n\n')}
+
+> Note: A detailed SVG graph and log file are available in the artifacts of this workflow run.`;
+                }
+
+                fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, newSummary);
+            } else if (fs.existsSync(logFile)) {
+                // Local monitoring mode - show analysis
+                const maxRss = Math.max(...Array.from(processes.values()).flatMap(p => p.rss));
+                const processCount = processes.size;
+                const duration = timestamps.length > 0 ?
+                    `from ${timestamps[0]} to ${timestamps[timestamps.length - 1]}` :
+                    'N/A';
+
+                const newSummary = `${summary}
 
 ## Build Process Analysis
 
@@ -279,8 +510,6 @@ ${mermaidChart}
 - Number of processes monitored: ${processCount}
 - Maximum RSS observed: ${maxRss.toFixed(2)} MB
 - Monitoring duration: ${duration}
-
-
 
 ### Process Details
 ${Array.from(processes.entries()).map(([key, data]) => {
@@ -296,7 +525,8 @@ ${Array.from(processes.entries()).map(([key, data]) => {
 
 > Note: A detailed SVG graph and log file are available in the artifacts of this workflow run.`;
 
-            fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, newSummary);
+                fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, newSummary);
+            }
         }
     } catch (error) {
         console.error('Error during cleanup:', error);
