@@ -1,0 +1,2158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Build Process Watcher - Example Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script src="/config.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            padding: 0;
+            margin: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            background: #fff;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            border-bottom: 1px solid #e5e7eb;
+            padding: 1rem 0;
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #111827;
+        }
+
+
+        .run-info {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .status-card {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .status-card h3 {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #6b7280;
+            margin-bottom: 0.5rem;
+        }
+
+        .status-card p {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #111827;
+        }
+
+        .status-in-progress {
+            color: #2563eb;
+        }
+
+        .status-completed {
+            color: #059669;
+        }
+
+        .chart-container {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            overflow-x: auto;
+        }
+
+        .chart-wrapper {
+            min-width: 600px;
+            width: 100%;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #6b7280;
+        }
+
+        .error {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            color: #dc2626;
+            text-align: center;
+        }
+
+        .not-found {
+            background: #fefce8;
+            border: 1px solid #fde68a;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            color: #a16207;
+            text-align: center;
+        }
+
+        .refresh-info {
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            color: #0369a1;
+            font-size: 0.875rem;
+            margin-bottom: 1rem;
+        }
+
+        @media (max-width: 768px) {
+            .status-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .chart-container {
+                padding: 1rem;
+                margin: 0 -10px 2rem -10px;
+                border-radius: 0;
+            }
+            
+            .chart-wrapper {
+                min-width: 500px;
+            }
+            
+            .container {
+                padding: 10px;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            .run-info h2 {
+                font-size: 1.25rem;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .status-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .chart-wrapper {
+                min-width: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Build Process Watcher</h1>
+        </header>
+
+        <div id="content">
+            <div class="loading">
+                <p>Loading run data...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Static example data from real run 18236843825 (311 samples)
+        // IMPORTANT: Define this BEFORE any code that uses it
+        const exampleData = {
+  "samples": [
+    {
+      "Timestamp": 1759978532068,
+      "ElapsedTime": 11,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 485,
+      "HeapUsed": 95,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978538129,
+      "ElapsedTime": 17,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 2801,
+      "HeapUsed": 125,
+      "HeapCap": 4068,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978543129,
+      "ElapsedTime": 22,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 2838,
+      "HeapUsed": 445,
+      "HeapCap": 4082,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978549129,
+      "ElapsedTime": 28,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 2952,
+      "HeapUsed": 842,
+      "HeapCap": 4032,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978555129,
+      "ElapsedTime": 34,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3013,
+      "HeapUsed": 1466,
+      "HeapCap": 4032,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978560129,
+      "ElapsedTime": 39,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3038,
+      "HeapUsed": 1550,
+      "HeapCap": 4032,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978566129,
+      "ElapsedTime": 45,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3061,
+      "HeapUsed": 34,
+      "HeapCap": 4050,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978571129,
+      "ElapsedTime": 50,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3094,
+      "HeapUsed": 1668,
+      "HeapCap": 4050,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978578129,
+      "ElapsedTime": 57,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3186,
+      "HeapUsed": 875,
+      "HeapCap": 3992,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978584129,
+      "ElapsedTime": 63,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3244,
+      "HeapUsed": 1905,
+      "HeapCap": 3988,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978590129,
+      "ElapsedTime": 69,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3297,
+      "HeapUsed": 454,
+      "HeapCap": 3908,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978595129,
+      "ElapsedTime": 74,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3337,
+      "HeapUsed": 1578,
+      "HeapCap": 3908,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978601129,
+      "ElapsedTime": 80,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3357,
+      "HeapUsed": 1720,
+      "HeapCap": 3908,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978606129,
+      "ElapsedTime": 85,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3495,
+      "HeapUsed": 1499,
+      "HeapCap": 4014,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978612129,
+      "ElapsedTime": 91,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 212,
+      "HeapUsed": 20,
+      "HeapCap": 230,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978612129,
+      "ElapsedTime": 91,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3514,
+      "HeapUsed": 1299,
+      "HeapCap": 3988,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978619129,
+      "ElapsedTime": 98,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 539,
+      "HeapUsed": 237,
+      "HeapCap": 415,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978619129,
+      "ElapsedTime": 98,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3514,
+      "HeapUsed": 1363,
+      "HeapCap": 3988,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978625129,
+      "ElapsedTime": 104,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 777,
+      "HeapUsed": 436,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978625129,
+      "ElapsedTime": 104,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3516,
+      "HeapUsed": 1445,
+      "HeapCap": 3988,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978631129,
+      "ElapsedTime": 110,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 779,
+      "HeapUsed": 441,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978631129,
+      "ElapsedTime": 110,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3516,
+      "HeapUsed": 1583,
+      "HeapCap": 3988,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978637129,
+      "ElapsedTime": 116,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 779,
+      "HeapUsed": 441,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978637129,
+      "ElapsedTime": 116,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3528,
+      "HeapUsed": 421,
+      "HeapCap": 3994,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978643129,
+      "ElapsedTime": 122,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978643129,
+      "ElapsedTime": 122,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3578,
+      "HeapUsed": 1685,
+      "HeapCap": 3980,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978650129,
+      "ElapsedTime": 129,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978650129,
+      "ElapsedTime": 129,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3644,
+      "HeapUsed": 1691,
+      "HeapCap": 3924,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978656129,
+      "ElapsedTime": 135,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978656129,
+      "ElapsedTime": 135,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3758,
+      "HeapUsed": 879,
+      "HeapCap": 4014,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978662129,
+      "ElapsedTime": 141,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978662129,
+      "ElapsedTime": 141,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3776,
+      "HeapUsed": 1391,
+      "HeapCap": 3928,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978668129,
+      "ElapsedTime": 147,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978668129,
+      "ElapsedTime": 147,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3806,
+      "HeapUsed": 686,
+      "HeapCap": 3990,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978675129,
+      "ElapsedTime": 154,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 783,
+      "HeapUsed": 450,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978675129,
+      "ElapsedTime": 154,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3830,
+      "HeapUsed": 1844,
+      "HeapCap": 3966,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978681129,
+      "ElapsedTime": 160,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978681129,
+      "ElapsedTime": 160,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3840,
+      "HeapUsed": 2190,
+      "HeapCap": 3966,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978687129,
+      "ElapsedTime": 166,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978687129,
+      "ElapsedTime": 166,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3840,
+      "HeapUsed": 2272,
+      "HeapCap": 3966,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978692129,
+      "ElapsedTime": 171,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978692129,
+      "ElapsedTime": 171,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3841,
+      "HeapUsed": 2380,
+      "HeapCap": 3966,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978698129,
+      "ElapsedTime": 177,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978698129,
+      "ElapsedTime": 177,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3843,
+      "HeapUsed": 2512,
+      "HeapCap": 3966,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978704129,
+      "ElapsedTime": 183,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978704129,
+      "ElapsedTime": 183,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3933,
+      "HeapUsed": 314,
+      "HeapCap": 3884,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978710129,
+      "ElapsedTime": 189,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978710129,
+      "ElapsedTime": 189,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3935,
+      "HeapUsed": 460,
+      "HeapCap": 3884,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978716129,
+      "ElapsedTime": 195,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978716129,
+      "ElapsedTime": 195,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3979,
+      "HeapUsed": 413,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978721129,
+      "ElapsedTime": 200,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978721129,
+      "ElapsedTime": 200,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3979,
+      "HeapUsed": 521,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978727129,
+      "ElapsedTime": 206,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978727129,
+      "ElapsedTime": 206,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3982,
+      "HeapUsed": 669,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978733129,
+      "ElapsedTime": 212,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978733129,
+      "ElapsedTime": 212,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 3982,
+      "HeapUsed": 767,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978739129,
+      "ElapsedTime": 218,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978739129,
+      "ElapsedTime": 218,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4005,
+      "HeapUsed": 975,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978745129,
+      "ElapsedTime": 224,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978745129,
+      "ElapsedTime": 224,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4006,
+      "HeapUsed": 1197,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978750129,
+      "ElapsedTime": 229,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978750129,
+      "ElapsedTime": 229,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4015,
+      "HeapUsed": 1745,
+      "HeapCap": 3938,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978756129,
+      "ElapsedTime": 235,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978756129,
+      "ElapsedTime": 235,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4054,
+      "HeapUsed": 754,
+      "HeapCap": 3918,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978763129,
+      "ElapsedTime": 242,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 91,
+      "HeapUsed": 17,
+      "HeapCap": 4096,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978763129,
+      "ElapsedTime": 242,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978763129,
+      "ElapsedTime": 242,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4139,
+      "HeapUsed": 1635,
+      "HeapCap": 3958,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978769129,
+      "ElapsedTime": 248,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 604,
+      "HeapUsed": 43,
+      "HeapCap": 4076,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978769129,
+      "ElapsedTime": 248,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978769129,
+      "ElapsedTime": 248,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4178,
+      "HeapUsed": 725,
+      "HeapCap": 3948,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978779129,
+      "ElapsedTime": 258,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 720,
+      "HeapUsed": 131,
+      "HeapCap": 4070,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978779129,
+      "ElapsedTime": 258,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978779129,
+      "ElapsedTime": 258,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4319,
+      "HeapUsed": 1862,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978787129,
+      "ElapsedTime": 266,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 929,
+      "HeapUsed": 274,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978787129,
+      "ElapsedTime": 266,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978787129,
+      "ElapsedTime": 266,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4332,
+      "HeapUsed": 2990,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978795129,
+      "ElapsedTime": 274,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 1090,
+      "HeapUsed": 236,
+      "HeapCap": 4058,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978795129,
+      "ElapsedTime": 274,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978795129,
+      "ElapsedTime": 274,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4351,
+      "HeapUsed": 1922,
+      "HeapCap": 4082,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978804129,
+      "ElapsedTime": 283,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 1156,
+      "HeapUsed": 370,
+      "HeapCap": 4058,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978804129,
+      "ElapsedTime": 283,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978804129,
+      "ElapsedTime": 283,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4393,
+      "HeapUsed": 1296,
+      "HeapCap": 4058,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978812129,
+      "ElapsedTime": 291,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2317,
+      "HeapUsed": 444,
+      "HeapCap": 4060,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978812129,
+      "ElapsedTime": 291,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978812129,
+      "ElapsedTime": 291,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4378,
+      "HeapUsed": 1192,
+      "HeapCap": 4052,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978821129,
+      "ElapsedTime": 300,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2340,
+      "HeapUsed": 558,
+      "HeapCap": 4032,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978821129,
+      "ElapsedTime": 300,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978821129,
+      "ElapsedTime": 300,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4394,
+      "HeapUsed": 2566,
+      "HeapCap": 4052,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978830129,
+      "ElapsedTime": 309,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2512,
+      "HeapUsed": 831,
+      "HeapCap": 4002,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978830129,
+      "ElapsedTime": 309,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978830129,
+      "ElapsedTime": 309,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4420,
+      "HeapUsed": 1778,
+      "HeapCap": 4038,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978838129,
+      "ElapsedTime": 317,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2706,
+      "HeapUsed": 746,
+      "HeapCap": 4040,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978838129,
+      "ElapsedTime": 317,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978838129,
+      "ElapsedTime": 317,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4418,
+      "HeapUsed": 1278,
+      "HeapCap": 4032,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978846129,
+      "ElapsedTime": 325,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2687,
+      "HeapUsed": 756,
+      "HeapCap": 4040,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978846129,
+      "ElapsedTime": 325,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978846129,
+      "ElapsedTime": 325,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4422,
+      "HeapUsed": 658,
+      "HeapCap": 3996,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978852129,
+      "ElapsedTime": 331,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2787,
+      "HeapUsed": 1146,
+      "HeapCap": 4044,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978852129,
+      "ElapsedTime": 331,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978852129,
+      "ElapsedTime": 331,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4430,
+      "HeapUsed": 2746,
+      "HeapCap": 4022,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978860129,
+      "ElapsedTime": 339,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2873,
+      "HeapUsed": 891,
+      "HeapCap": 4018,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978860129,
+      "ElapsedTime": 339,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978860129,
+      "ElapsedTime": 339,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4464,
+      "HeapUsed": 764,
+      "HeapCap": 3992,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978868129,
+      "ElapsedTime": 347,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2900,
+      "HeapUsed": 1490,
+      "HeapCap": 4016,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978868129,
+      "ElapsedTime": 347,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978868129,
+      "ElapsedTime": 347,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4451,
+      "HeapUsed": 1714,
+      "HeapCap": 3992,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978868129,
+      "ElapsedTime": 347,
+      "PID": "11229",
+      "Name": "GradleWorkerMain",
+      "RSS": 309,
+      "HeapUsed": 29,
+      "HeapCap": 247,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978879129,
+      "ElapsedTime": 358,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2937,
+      "HeapUsed": 903,
+      "HeapCap": 4048,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978879129,
+      "ElapsedTime": 358,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978879129,
+      "ElapsedTime": 358,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 189,
+      "HeapUsed": 74,
+      "HeapCap": 249,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978879129,
+      "ElapsedTime": 358,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4465,
+      "HeapUsed": 2906,
+      "HeapCap": 3994,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978888129,
+      "ElapsedTime": 367,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 2941,
+      "HeapUsed": 1141,
+      "HeapCap": 4048,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978888129,
+      "ElapsedTime": 367,
+      "PID": "11955",
+      "Name": "GradleWorkerMain",
+      "RSS": 204,
+      "HeapUsed": 79,
+      "HeapCap": 248,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978888129,
+      "ElapsedTime": 367,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978888129,
+      "ElapsedTime": 367,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 265,
+      "HeapUsed": 32,
+      "HeapCap": 115,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978888129,
+      "ElapsedTime": 367,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4617,
+      "HeapUsed": 2228,
+      "HeapCap": 4092,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3059,
+      "HeapUsed": 926,
+      "HeapCap": 4048,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 192,
+      "HeapUsed": 75,
+      "HeapCap": 249,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "12359",
+      "Name": "GradleWorkerMain",
+      "RSS": 257,
+      "HeapUsed": 120,
+      "HeapCap": 249,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 785,
+      "HeapUsed": 451,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 393,
+      "HeapUsed": 80,
+      "HeapCap": 132,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978899129,
+      "ElapsedTime": 378,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4619,
+      "HeapUsed": 2956,
+      "HeapCap": 4092,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3059,
+      "HeapUsed": 978,
+      "HeapCap": 4048,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 270,
+      "HeapUsed": 90,
+      "HeapCap": 109,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "12359",
+      "Name": "GradleWorkerMain",
+      "RSS": 292,
+      "HeapUsed": 96,
+      "HeapCap": 107,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 590,
+      "HeapUsed": 137,
+      "HeapCap": 174,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978910129,
+      "ElapsedTime": 389,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4641,
+      "HeapUsed": 1953,
+      "HeapCap": 4024,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3063,
+      "HeapUsed": 962,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 414,
+      "HeapUsed": 112,
+      "HeapCap": 145,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 310,
+      "HeapUsed": 61,
+      "HeapCap": 242,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 852,
+      "HeapUsed": 161,
+      "HeapCap": 178,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978923129,
+      "ElapsedTime": 402,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4642,
+      "HeapUsed": 2541,
+      "HeapCap": 4024,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3063,
+      "HeapUsed": 1510,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 540,
+      "HeapUsed": 127,
+      "HeapCap": 182,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 340,
+      "HeapUsed": 95,
+      "HeapCap": 129,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 916,
+      "HeapUsed": 144,
+      "HeapCap": 214,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978935129,
+      "ElapsedTime": 414,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4642,
+      "HeapUsed": 2883,
+      "HeapCap": 4024,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3063,
+      "HeapUsed": 1514,
+      "HeapCap": 4090,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 819,
+      "HeapUsed": 113,
+      "HeapCap": 327,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 425,
+      "HeapUsed": 118,
+      "HeapCap": 154,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "11624",
+      "Name": "GradleWorkerMain",
+      "RSS": 1012,
+      "HeapUsed": 183,
+      "HeapCap": 261,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978947129,
+      "ElapsedTime": 426,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4641,
+      "HeapUsed": 2767,
+      "HeapCap": 4024,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978959129,
+      "ElapsedTime": 438,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3064,
+      "HeapUsed": 1074,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978959129,
+      "ElapsedTime": 438,
+      "PID": "12386",
+      "Name": "GradleWorkerMain",
+      "RSS": 911,
+      "HeapUsed": 108,
+      "HeapCap": 347,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978959129,
+      "ElapsedTime": 438,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 543,
+      "HeapUsed": 111,
+      "HeapCap": 191,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978959129,
+      "ElapsedTime": 438,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978959129,
+      "ElapsedTime": 438,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4673,
+      "HeapUsed": 1913,
+      "HeapCap": 4020,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978969129,
+      "ElapsedTime": 448,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3070,
+      "HeapUsed": 1258,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978969129,
+      "ElapsedTime": 448,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 634,
+      "HeapUsed": 144,
+      "HeapCap": 197,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978969129,
+      "ElapsedTime": 448,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978969129,
+      "ElapsedTime": 448,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4631,
+      "HeapUsed": 775,
+      "HeapCap": 4040,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978969129,
+      "ElapsedTime": 448,
+      "PID": "15083",
+      "Name": "GradleWorkerMain",
+      "RSS": 235,
+      "HeapUsed": 70,
+      "HeapCap": 85,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978978129,
+      "ElapsedTime": 457,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3070,
+      "HeapUsed": 1260,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978978129,
+      "ElapsedTime": 457,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 745,
+      "HeapUsed": 186,
+      "HeapCap": 216,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978978129,
+      "ElapsedTime": 457,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978978129,
+      "ElapsedTime": 457,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4631,
+      "HeapUsed": 867,
+      "HeapCap": 4040,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978978129,
+      "ElapsedTime": 457,
+      "PID": "15083",
+      "Name": "GradleWorkerMain",
+      "RSS": 620,
+      "HeapUsed": 253,
+      "HeapCap": 352,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978987129,
+      "ElapsedTime": 466,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3070,
+      "HeapUsed": 1260,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978987129,
+      "ElapsedTime": 466,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 1337,
+      "HeapUsed": 272,
+      "HeapCap": 506,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978987129,
+      "ElapsedTime": 466,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978987129,
+      "ElapsedTime": 466,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4631,
+      "HeapUsed": 959,
+      "HeapCap": 4040,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978987129,
+      "ElapsedTime": 466,
+      "PID": "15083",
+      "Name": "GradleWorkerMain",
+      "RSS": 678,
+      "HeapUsed": 204,
+      "HeapCap": 374,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978995129,
+      "ElapsedTime": 474,
+      "PID": "7841",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 3070,
+      "HeapUsed": 1260,
+      "HeapCap": 4072,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978995129,
+      "ElapsedTime": 474,
+      "PID": "13267",
+      "Name": "GradleWorkerMain",
+      "RSS": 1490,
+      "HeapUsed": 262,
+      "HeapCap": 511,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978995129,
+      "ElapsedTime": 474,
+      "PID": "3735",
+      "Name": "KotlinCompileDaemon",
+      "RSS": 786,
+      "HeapUsed": 456,
+      "HeapCap": 660,
+      "RunID": ""
+    },
+    {
+      "Timestamp": 1759978995129,
+      "ElapsedTime": 474,
+      "PID": "2217",
+      "Name": "GradleDaemon",
+      "RSS": 4629,
+      "HeapUsed": 1053,
+      "HeapCap": 4040,
+      "RunID": ""
+    }
+  ],
+  "finished": true,
+  "finished_at": "2025-10-09T03:03:16.129Z",
+  "updated_at": "2025-10-09T03:03:16.129Z"
+};
+
+        async function loadRunData(runId) {
+            try {
+                console.log('📊 Using static example data from real run 18236843825');
+                const data = exampleData;
+                renderDashboard(runId, data);
+                
+                // No auto-refresh for example data
+                
+            } catch (error) {
+                console.error('Error loading run data:', error);
+                showError(error.message);
+            }
+        }
+
+        function renderDashboard(runId, data) {
+            const isFinished = data.finished;
+            const samples = data.samples || [];
+            
+            document.getElementById('content').innerHTML = `
+                <div class="run-info">
+                    <h2>Run Details</h2>
+                    <p><strong>Run ID:</strong> <code>${runId}</code></p>
+                    ${data.finished_at ? `<p><strong>Finished:</strong> ${new Date(data.finished_at).toLocaleString()}</p>` : ''}
+                    ${data.updated_at ? `<p><strong>Last Updated:</strong> ${new Date(data.updated_at).toLocaleString()}</p>` : ''}
+                </div>
+
+                ${!isFinished ? '<div class="refresh-info">🔄 Auto-refreshing every 60 seconds (will stop when build completes)</div>' : ''}
+
+                <div class="status-grid">
+                    <div class="status-card">
+                        <h3>Status</h3>
+                        <p class="${isFinished ? 'status-completed' : 'status-in-progress'}">
+                            ${isFinished ? 'Completed' : 'In Progress'}
+                        </p>
+                    </div>
+                    <div class="status-card">
+                        <h3>Samples</h3>
+                        <p>${samples.length}</p>
+                    </div>
+                    <div class="status-card">
+                        <h3>Processes</h3>
+                        <p>${new Set(samples.map(s => s.Name)).size}</p>
+                    </div>
+                    <div class="status-card">
+                        <h3>Auto-refresh</h3>
+                        <p>${isFinished ? 'Stopped' : 'Active (60s)'}</p>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <h3>Memory Usage Over Time</h3>
+                    <div class="chart-wrapper">
+                        <div id="chart" style="width: 100%; height: 500px;"></div>
+                    </div>
+                </div>
+            `;
+
+            if (samples.length > 0) {
+                renderChart(runId, samples);
+            }
+        }
+
+        function renderChart(runId, samples) {
+            // Process data for chart
+            const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
+            const processes = [...new Set(samples.map(s => `${s.Name} (PID: ${s.PID})`))];
+            const processNames = [...new Set(samples.map(s => s.Name))];
+            
+            const traces = [];
+            const colors = ['#3498db', '#e74c3c', '#9b59b6', '#2ecc71', '#f39c12', '#e67e22'];
+            
+            // Create traces for each process
+            processNames.forEach((processName, index) => {
+                const color = colors[index % colors.length];
+                // Get the PID for this process (assuming all samples for same process have same PID)
+                const processSamples = samples.filter(s => s.Name === processName);
+                const pid = processSamples.length > 0 ? processSamples[0].PID : 'unknown';
+                
+                // RSS data
+                const rssData = timestamps.map(timestamp => {
+                    const sample = samples
+                        .filter(s => s.Name === processName && s.Timestamp <= timestamp)
+                        .sort((a, b) => b.Timestamp - a.Timestamp)[0];
+                    return sample ? sample.RSS : 0;
+                });
+                
+                traces.push({
+                    x: timestamps.map(t => new Date(t)),
+                    y: rssData,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: `${processName} PID:${pid} (RSS)`,
+                    line: { color: color, width: 3 }
+                });
+                
+                // Heap data
+                const heapData = timestamps.map(timestamp => {
+                    const sample = samples
+                        .filter(s => s.Name === processName && s.Timestamp <= timestamp)
+                        .sort((a, b) => b.Timestamp - a.Timestamp)[0];
+                    return sample ? sample.HeapUsed : 0;
+                });
+                
+                traces.push({
+                    x: timestamps.map(t => new Date(t)),
+                    y: heapData,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: `${processName} PID:${pid} (Heap)`,
+                    line: { color: color, width: 2, dash: 'dash' }
+                });
+            });
+            
+            // Add total memory trace
+            const totalData = timestamps.map(timestamp => {
+                let total = 0;
+                processNames.forEach(processName => {
+                    const sample = samples
+                        .filter(s => s.Name === processName && s.Timestamp <= timestamp)
+                        .sort((a, b) => b.Timestamp - a.Timestamp)[0];
+                    if (sample) total += sample.RSS;
+                });
+                return total;
+            });
+            
+            traces.push({
+                x: timestamps.map(t => new Date(t)),
+                y: totalData,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Total Memory',
+                line: { color: '#2c3e50', width: 4 }
+            });
+
+            // Detect if mobile
+            const isMobile = window.innerWidth < 768;
+            
+            const layout = {
+                title: isMobile ? '' : 'Memory Usage Over Time', // Hide title on mobile to save space
+                xaxis: { 
+                    title: 'Time',
+                    tickformat: isMobile ? '%H:%M' : '%H:%M:%S', // Shorter time format on mobile
+                    tickangle: isMobile ? -45 : 0
+                },
+                yaxis: { title: 'Memory (MB)' },
+                showlegend: true,
+                legend: { 
+                    x: isMobile ? 0.5 : 1.02, 
+                    y: isMobile ? -0.2 : 1,
+                    xanchor: isMobile ? 'center' : 'left',
+                    orientation: isMobile ? 'h' : 'v'
+                },
+                margin: { 
+                    l: isMobile ? 50 : 60, 
+                    r: isMobile ? 20 : 100, 
+                    t: isMobile ? 20 : 40, 
+                    b: isMobile ? 80 : 60 
+                },
+                font: {
+                    size: isMobile ? 10 : 12
+                }
+            };
+
+            const config = {
+                responsive: true,
+                displayModeBar: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d', 'autoScale2d'],
+                toImageButtonOptions: {
+                    format: 'png',
+                    filename: `build-monitor-${runId}`,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                }
+            };
+
+            Plotly.newPlot('chart', traces, layout, config);
+            
+            // Handle window resize
+            window.addEventListener('resize', function() {
+                Plotly.Plots.resize('chart');
+            });
+        }
+
+        function showNotFound(runId) {
+            document.getElementById('content').innerHTML = `
+                <div class="not-found">
+                    <h2>Run Not Found</h2>
+                    <p>The build run with ID <code>${runId}</code> could not be found.</p>
+                    <p>This might be because:</p>
+                    <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
+                        <li>The memory report has expired (available for 3 hours)</li>
+                        <li>The run ID is incorrect</li>
+                        <li>The build is still in progress</li>
+                    </ul>
+                    <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none;">Back to Home</a>
+                </div>
+            `;
+        }
+
+        function showError(message) {
+            document.getElementById('content').innerHTML = `
+                <div class="error">
+                    <h2>Error Loading Data</h2>
+                    <p>Failed to load run data: ${message}</p>
+                    <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none;">Back to Home</a>
+                </div>
+            `;
+        }
+
+        // Initialize the page after all functions and data are defined
+        (function init() {
+            // Version check
+            console.log('📦 Example Dashboard v2.0 - Static Data (No Backend Fetch)');
+            console.log('✅ exampleData defined:', typeof exampleData !== 'undefined');
+            console.log('📊 Sample count:', exampleData?.samples?.length || 0);
+            
+            // Get run ID from URL
+            const pathParts = window.location.pathname.split('/');
+            const runId = pathParts[pathParts.length - 1];
+            
+            if (!runId || runId === 'runs' || runId === '') {
+                document.getElementById('content').innerHTML = `
+                    <div class="error">
+                        <h2>Invalid Run ID</h2>
+                        <p>No run ID provided in the URL.</p>
+                        <a href="https://process-watcher.web.app" style="color: #2563eb;">Back to Home</a>
+                    </div>
+                `;
+            } else {
+                loadRunData(runId);
+            }
+        })();
+    </script>
+
+    <footer style="margin-top: 4rem; padding: 2rem 1rem; border-top: 1px solid #e5e7eb; text-align: center; color: #6b7280; font-size: 0.875rem;">
+        <div style="max-width: 1200px; margin: 0 auto;">
+            <p style="margin-bottom: 1rem;">
+                Build Process Watcher - Monitor your Gradle builds
+            </p>
+            <div style="display: flex; justify-content: center; gap: 2rem; flex-wrap: wrap;">
+                <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none;">
+                    Home
+                </a>
+                <a href="https://github.com/cdsap/build-process-watcher" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: none;">
+                    GitHub Repository
+                </a>
+                <a href="https://github.com/marketplace/actions/build-process-watcher" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: none;">
+                    GitHub Action
+                </a>
+            </div>
+            <p style="margin-top: 1rem; font-size: 0.75rem; color: #9ca3af;">
+                This is a static example with real data · Memory reports are available for 3 hours · Free service
+            </p>
+        </div>
+    </footer>
+</body>
+</html>

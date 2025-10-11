@@ -1,0 +1,21 @@
+{
+  "hosting": {
+    "site": "process-watcher",
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/runs/**",
+        "destination": "/runs/[runId].html"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
