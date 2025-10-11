@@ -55,14 +55,29 @@ jobs:
           echo "❌ ERROR: dist/index_with_backend.js not found!"
           exit 1
         fi
+        echo "✅ dist/index_with_backend.js exists"
+        
         if [ ! -f "dist/cleanup.js" ]; then
           echo "❌ ERROR: dist/cleanup.js not found!"
           exit 1
         fi
-        if [ ! -x "monitor_with_backend.sh" ]; then
-          echo "❌ ERROR: monitor_with_backend.sh is not executable!"
+        echo "✅ dist/cleanup.js exists"
+        
+        if [ ! -f "monitor_with_backend.sh" ]; then
+          echo "❌ ERROR: monitor_with_backend.sh not found!"
           exit 1
         fi
+        echo "✅ monitor_with_backend.sh exists"
+        
+        # Check if we can make it executable (the action will do this at runtime)
+        chmod +x monitor_with_backend.sh
+        if [ -x "monitor_with_backend.sh" ]; then
+          echo "✅ monitor_with_backend.sh can be made executable"
+        else
+          echo "❌ ERROR: Cannot make monitor_with_backend.sh executable!"
+          exit 1
+        fi
+        
         echo "✅ All required files present and valid"
 
     - name: Check action metadata
