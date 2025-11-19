@@ -1,10 +1,15 @@
 name: Deploy Frontend
 
 on:
-  push:
-    branches: [ main ]
-    paths: [ 'frontend/**' ]
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy from'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+        - main
 
 jobs:
   deploy-frontend:
@@ -16,6 +21,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.branch }}
 
     - name: Inject config
       env:
