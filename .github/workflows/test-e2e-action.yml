@@ -18,6 +18,7 @@ on:
       - 'monitor_with_backend.sh'
       - '.github/workflows/test-e2e-action.yml'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test-local-mode:

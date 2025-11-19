@@ -12,6 +12,7 @@ on:
       - 'backend/**'
       - '.github/workflows/test-backend.yml'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test:
