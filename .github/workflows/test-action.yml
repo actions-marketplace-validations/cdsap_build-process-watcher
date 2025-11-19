@@ -22,6 +22,7 @@ on:
       - 'action.yaml'
       - '.github/workflows/test-action.yml'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:
