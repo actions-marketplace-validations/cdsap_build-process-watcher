@@ -393,6 +393,7 @@
   uses: cdsap/build-process-watcher@0.4.0
   with:
     remote_monitoring: 'true'
+    collect_gc: 'true' 
     
 - name: Build project
   run: ./gradlew clean build
@@ -400,6 +401,9 @@
 </code></pre>
                 <p style="margin-top: 1rem; font-size: 0.875rem; color: #6b7280;">
                     <strong>Output:</strong> Dashboard URL will be displayed in the action output (data available for 3 hours)
+                </p>
+                <p style="margin-top: 0.75rem; font-size: 0.875rem; color: #059669; padding: 0.75rem; background: rgba(5, 150, 105, 0.1); border-radius: 0.5rem; border-left: 3px solid #059669;">
+                    <strong>💡 GC Collection:</strong> Set <code>collect_gc: 'true'</code> to monitor garbage collection time in seconds. This adds a GC time chart to your dashboard showing GC performance over time.
                 </p>
             </div>
             </div>
@@ -424,8 +428,11 @@
                     🌐 <span>Remote Mode - Live Dashboard</span>
                 </h4>
                 <p style="margin-bottom: 1rem; color: #4b5563;">Check the current state of processes in real-time through our web dashboard. Data is stored in the cloud with 3-hour retention.</p>
-                <div style="background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #10b981;">
+                <div style="background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #10b981; margin-bottom: 1rem;">
                     <strong>Output:</strong> Live dashboard URL with real-time monitoring data (available for 3 hours)
+                </div>
+                <div style="background: rgba(5, 150, 105, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #059669;">
+                    <strong>🔄 GC Time Monitoring:</strong> Enable <code>collect_gc: 'true'</code> to track garbage collection performance. The dashboard will display GC time in seconds, helping you identify GC-related performance issues.
                 </div>
             </div>
         </div>
