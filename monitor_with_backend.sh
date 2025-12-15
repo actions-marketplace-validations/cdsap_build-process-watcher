@@ -166,7 +166,11 @@ get_vm_flags() {
     fi
 
     log_script "get_vm_flags: jinfo output length: ${#jinfo_output} chars"
-    log_script "get_vm_flags: jinfo output preview (first 200 chars): '${jinfo_output:0:200}'"
+    log_script "get_vm_flags: Full jinfo output:"
+    # Log the full output, but escape newlines for single-line logging
+    echo "$jinfo_output" | while IFS= read -r line; do
+        log_script "get_vm_flags:   $line"
+    done
 
     # Extract VM flags (everything after "VM Flags:")
     # The output format can be: "VM Flags: -XX:flag1 -XX:flag2 ..." or just "VM Flags:" on its own line
