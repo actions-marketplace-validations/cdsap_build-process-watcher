@@ -525,9 +525,9 @@ async function run() {
             console.log('==========================================\n');
         }
 
-        // Print script debug log if it exists (always print, not just in debug mode)
+        // Print script debug log if it exists (only in debug mode)
         const scriptDebugLog = path.join(actionDir, '..', 'script_debug.log');
-        if (fs.existsSync(scriptDebugLog)) {
+        if (fs.existsSync(scriptDebugLog) && debugMode) {
             console.log('\n🔍 Script Debug Log:');
             console.log('==========================================');
             const scriptDebugContent = fs.readFileSync(scriptDebugLog, 'utf8');
