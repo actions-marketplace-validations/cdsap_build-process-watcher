@@ -17,9 +17,9 @@ type Sample struct {
 
 // ProcessInfo contains information about a specific process
 type ProcessInfo struct {
-	PID     string   `firestore:"pid"`
-	Name    string   `firestore:"name"`
-	VMFlags []string `firestore:"vm_flags"`
+	PID     string   `json:"pid" firestore:"pid"`
+	Name    string   `json:"name" firestore:"name"`
+	VMFlags []string `json:"vm_flags" firestore:"vm_flags"`
 }
 
 // ProcessDoc represents a processes document in Firestore (one per run)
@@ -29,7 +29,7 @@ type ProcessDoc struct {
 	CreatedAt          time.Time              `firestore:"created_at"`
 	UpdatedAt          time.Time              `firestore:"updated_at"`
 	UpdatedAtTimestamp int64                  `firestore:"updated_at_timestamp"` // Unix millis for timezone-independent queries
-	ExpireAt           time.Time              `firestore:"expire_at,omitempty"` // TTL field - set manually in Firestore, used by TTL policy
+	ExpireAt           time.Time              `firestore:"expire_at,omitempty"`  // TTL field - set manually in Firestore, used by TTL policy
 }
 
 // RunDoc represents a monitoring run document in Firestore
