@@ -166,22 +166,31 @@ get_vm_flags() {
     fi
 
     log_script "get_vm_flags: jinfo output length: ${#jinfo_output} chars"
+    log_script "get_vm_flags: jinfo output preview (first 200 chars): '${jinfo_output:0:200}'"
 
     # Extract VM flags (everything after "VM Flags:")
-    # The output format is: "VM Flags: -XX:flag1 -XX:flag2 ..."
+    # The output format can be: "VM Flags: -XX:flag1 -XX:flag2 ..." or just "VM Flags:" on its own line
     local vm_flags_line
     # Use grep with || echo to prevent pipefail from exiting script when grep finds no match
     if echo "$jinfo_output" | grep -q "VM Flags:"; then
         log_script "get_vm_flags: Found 'VM Flags:' in jinfo output"
-        vm_flags_line=$(echo "$jinfo_output" | grep "VM Flags:" | sed 's/VM Flags://' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
-        log_script "get_vm_flags: Extracted VM flags line: '$vm_flags_line'"
+        # Extract the line containing "VM Flags:" and everything after it
+        # Handle both single-line and multi-line formats
+        vm_flags_line=$(echo "$jinfo_output" | grep -A 1 "VM Flags:" | tail -n 1 | sed 's/VM Flags://' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        
+        # If that didn't work, try extracting everything after "VM Flags:" on the same line
+        if [ -z "$vm_flags_line" ]; then
+            vm_flags_line=$(echo "$jinfo_output" | grep "VM Flags:" | sed 's/.*VM Flags:[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        fi
+        
+        log_script "get_vm_flags: Extracted VM flags line (length ${#vm_flags_line}): '$vm_flags_line'"
     else
         log_script "get_vm_flags: 'VM Flags:' not found in jinfo output"
         vm_flags_line=""
     fi
     
     if [ -z "$vm_flags_line" ]; then
-        log_script "get_vm_flags: VM flags line is empty, returning failure"
+        log_script "get_vm_flags: VM flags line is empty after extraction - this is OK, process will continue without VM flags"
         return 1
     fi
 
@@ -541,7 +550,7 @@ while true; do
   
   log_script "=== Iteration $ITERATION at $TIMESTAMP (elapsed: ${ELAPSED_TIME}s) ==="
   
-  jps_output=$(jps 2>&1)
+  jps_output=$(jps)
   jps_exit_code=$?
   
   log_script "jps command executed, exit code: $jps_exit_code"
