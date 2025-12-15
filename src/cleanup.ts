@@ -448,16 +448,42 @@ async function markProcessAsFinishedDirect(runId: string): Promise<void> {
     }
 }
 
-// Global flag to prevent multiple cleanup runs
-let cleanupExecuted = false;
+// File-based lock to prevent multiple cleanup runs across different processes
+const LOCK_FILE = 'cleanup.lock';
+
+function acquireLock(): boolean {
+    try {
+        // Try to create lock file exclusively
+        const fd = fs.openSync(LOCK_FILE, 'wx');
+        fs.closeSync(fd);
+        return true;
+    } catch (error) {
+        // Lock file exists or other error - cleanup already running
+        return false;
+    }
+}
+
+function releaseLock(): void {
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            fs.unlinkSync(LOCK_FILE);
+        }
+    } catch (error) {
+        // Ignore errors when releasing lock
+    }
+}
 
 async function run() {
-    try {
-        // Prevent multiple cleanup executions
-        if (cleanupExecuted) {
-            return;
+    // Prevent multiple cleanup executions using file-based lock
+    if (!acquireLock()) {
+        const debugMode = process.env.DEBUG_MODE === 'true';
+        if (debugMode) {
+            console.log('⚠️  Cleanup already running, skipping duplicate execution');
         }
-        cleanupExecuted = true;
+        return;
+    }
+    
+    try {
         
         // Check debug mode from environment variable
         const debugMode = process.env.DEBUG_MODE === 'true';
@@ -588,14 +614,26 @@ async function run() {
         const hasRuntimeToken = process.env.ACTIONS_RUNTIME_TOKEN !== undefined || 
                                process.env.GITHUB_TOKEN !== undefined;
         
-        if (isGitHubActions && hasRuntimeToken) {
+        // Check if we're being called from a trap handler (they set a marker env var)
+        // or if we're the first cleanup (post action) - only upload once
+        const isTrapHandler = process.env.CLEANUP_FROM_TRAP === 'true';
+        const shouldUpload = !isTrapHandler && isGitHubActions && hasRuntimeToken;
+        
+        if (shouldUpload) {
             try {
                 const artifactClient = new DefaultArtifactClient();
-                // Create unique artifact name using job ID and run attempt to avoid conflicts
+                // Create stable artifact name using job ID and run attempt
+                // Use run_id if available, otherwise use a simple name to avoid duplicates
                 const jobId = process.env.GITHUB_JOB || 'default';
                 const runAttempt = process.env.GITHUB_RUN_ATTEMPT || '1';
-                const timestamp = Date.now();
-                const artifactName = `build_process_watcher-${jobId}-${runAttempt}-${timestamp}`;
+                const runId = process.env.RUN_ID || '';
+                
+                // Use run_id in artifact name if available, otherwise use job+attempt
+                // This prevents duplicate artifacts when cleanup runs multiple times
+                const artifactName = runId 
+                    ? `build_process_watcher-${runId}`
+                    : `build_process_watcher-${jobId}-${runAttempt}`;
+                
                 const files = [];
                 
                 // Only include files that exist
@@ -610,6 +648,9 @@ async function run() {
                 }
                 if (fs.existsSync('backend_debug.log')) {
                     files.push('backend_debug.log');
+                }
+                if (fs.existsSync('script_debug.log')) {
+                    files.push('script_debug.log');
                 }
                 
                 if (files.length > 0) {
@@ -738,6 +779,9 @@ ${Array.from(processes.entries()).map(([key, data]) => {
     } catch (error) {
         console.error('Error during cleanup:', error);
         process.exit(1);
+    } finally {
+        // Always release the lock
+        releaseLock();
     }
 }
 

@@ -423,8 +423,9 @@ if ! get_auth_token; then
 fi
 
 # Trap graceful shutdown (SIGTERM, SIGINT)
-trap 'echo "💥 Monitor received termination signal. Running cleanup."; node dist/cleanup.js; exit' TERM INT
-trap 'echo "🧹 Monitor exiting normally. Running cleanup."; node dist/cleanup.js' EXIT
+# Mark that cleanup is being called from trap (so it doesn't upload artifacts)
+trap 'echo "💥 Monitor received termination signal. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js; exit' TERM INT
+trap 'echo "🧹 Monitor exiting normally. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js' EXIT
 
 # Create PID file
 echo $$ > "$PID_FILE"
