@@ -542,7 +542,7 @@ while true; do
   log_script "=== Iteration $ITERATION at $TIMESTAMP (elapsed: ${ELAPSED_TIME}s) ==="
   
   jps_output=$(jps 2>&1)
-  local jps_exit_code=$?
+  jps_exit_code=$?
   
   log_script "jps command executed, exit code: $jps_exit_code"
   log_script "jps output: '$jps_output'"
@@ -588,7 +588,7 @@ while true; do
           # Get VM flags for this process
           log_script "Calling get_vm_flags for PID $PID"
           VM_FLAGS_JSON=$(get_vm_flags "$PID")
-          local vm_flags_exit=$?
+          vm_flags_exit=$?
           log_script "get_vm_flags returned exit code: $vm_flags_exit"
           
           if [ $vm_flags_exit -eq 0 ] && [ -n "$VM_FLAGS_JSON" ]; then
