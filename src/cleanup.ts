@@ -525,6 +525,16 @@ async function run() {
             console.log('==========================================\n');
         }
 
+        // Print script debug log if it exists (always print, not just in debug mode)
+        const scriptDebugLog = path.join(actionDir, '..', 'script_debug.log');
+        if (fs.existsSync(scriptDebugLog)) {
+            console.log('\n🔍 Script Debug Log:');
+            console.log('==========================================');
+            const scriptDebugContent = fs.readFileSync(scriptDebugLog, 'utf8');
+            console.log(scriptDebugContent);
+            console.log('==========================================\n');
+        }
+
         // Check if we have a log file
         // The monitor script creates files in the action directory, not the project directory
         const logFile = path.join(actionDir, '..', 'build_process_watcher.log');
