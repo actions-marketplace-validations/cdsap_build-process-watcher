@@ -25694,11 +25694,23 @@ async function run() {
         const runId = core.getInput('run_id') || `run-${Date.now()}`;
         const logFile = core.getInput('log_file') || 'build_process_watcher.log';
         const debugMode = core.getInput('debug') === 'true';
-        // If backend is enabled but no URL provided, use the default Cloud Run URL
+        // collect_gc defaults to 'true' - only disable if explicitly set to 'false'
+        const collectGcInput = core.getInput('collect_gc');
+        const collectGc = collectGcInput === '' || collectGcInput === 'true';
+        const disableSummaryOutput = core.getInput('disable_summary_output') === 'true';
+        const environment = core.getInput('environment') || 'production'; // Default to production
+        // If backend is enabled but no URL provided, use the default Cloud Run URL based on environment
         if (enableBackend && !backendUrl) {
-            backendUrl = 'https://build-process-watcher-backend-685615422311.us-central1.run.app';
+            if (environment === 'staging') {
+                // Default staging backend URL (users should update this to their actual staging URL)
+                backendUrl = 'https://build-process-watcher-backend-staging-685615422311.us-central1.run.app';
+            }
+            else {
+                // Default production backend URL
+                backendUrl = 'https://build-process-watcher-backend-685615422311.us-central1.run.app';
+            }
             if (debugMode) {
-                core.info(`🔧 Backend enabled but no URL provided, using default: ${backendUrl}`);
+                core.info(`🔧 Backend enabled but no URL provided, using default ${environment} URL: ${backendUrl}`);
             }
         }
         // Show mode and essential info
@@ -25710,19 +25722,61 @@ async function run() {
             core.info(`⚙️  Remote Monitoring: ${enableBackend}`);
             core.info(`🐛 Debug Mode: ${debugMode}`);
         }
+        // Build frontend URL if backend is enabled (do this before exporting)
+        let frontendUrl = '';
+        if (enableBackend && backendUrl) {
+            // Determine if we're in staging mode
+            const isStaging = environment === 'staging' || backendUrl.includes('-staging');
+            // Check for frontend URL from environment variables first, then input
+            // This allows workflows to set FRONTEND_URL_STAGING or FRONTEND_URL as env vars
+            const envFrontendUrl = isStaging
+                ? process.env.FRONTEND_URL_STAGING || process.env.FRONTEND_URL
+                : process.env.FRONTEND_URL;
+            // Check explicit frontend URL: env vars first, then input parameter
+            const explicitFrontendUrl = envFrontendUrl || core.getInput('frontend_url');
+            if (explicitFrontendUrl) {
+                // Use explicitly provided frontend URL (from env var or input)
+                if (explicitFrontendUrl.endsWith('/runs') || explicitFrontendUrl.endsWith('/runs/')) {
+                    frontendUrl = `${explicitFrontendUrl}/${runId}`;
+                }
+                else {
+                    frontendUrl = `${explicitFrontendUrl}/runs/${runId}`;
+                }
+                if (debugMode && envFrontendUrl) {
+                    core.info(`🌐 Using frontend URL from environment variable: ${envFrontendUrl}`);
+                }
+            }
+            else {
+                // Derive frontend URL from backend URL pattern or environment
+                // Production: build-process-watcher-backend -> process-watcher.web.app
+                // Staging: build-process-watcher-backend-staging -> build-process-watcher-staging.web.app
+                let baseFrontendUrl = 'https://process-watcher.web.app';
+                if (isStaging) {
+                    // Staging backend - use default staging frontend URL
+                    // User should provide frontend_url or FRONTEND_URL_STAGING for custom URLs
+                    baseFrontendUrl = 'https://build-process-watcher-staging.web.app';
+                    if (debugMode) {
+                        core.info(`🔧 Staging mode detected - using default staging frontend URL`);
+                        core.info(`💡 Tip: Set FRONTEND_URL_STAGING env var or provide frontend_url input for custom staging URL`);
+                    }
+                }
+                frontendUrl = `${baseFrontendUrl}/runs/${runId}`;
+            }
+            if (debugMode) {
+                core.info(`🌐 Frontend URL: ${frontendUrl}`);
+            }
+        }
         // Export variables for the cleanup step
         core.exportVariable('ENABLE_BACKEND', enableBackend.toString());
         core.exportVariable('BACKEND_URL', backendUrl || '');
         core.exportVariable('RUN_ID', runId);
         core.exportVariable('LOG_FILE', logFile);
-        // Build frontend URL if backend is enabled
-        let frontendUrl = '';
-        if (enableBackend && backendUrl) {
-            // Use the Firebase hosting URL for the frontend
-            frontendUrl = `https://process-watcher.web.app/runs/${runId}`;
-            if (debugMode) {
-                core.info(`🌐 Frontend URL: ${frontendUrl}`);
-            }
+        core.exportVariable('ENVIRONMENT', environment);
+        core.exportVariable('DISABLE_SUMMARY_OUTPUT', disableSummaryOutput.toString());
+        if (frontendUrl) {
+            // Extract base URL (without /runs/runId) for cleanup step
+            const baseFrontendUrl = frontendUrl.replace(/\/runs\/.*$/, '');
+            core.exportVariable('FRONTEND_URL', baseFrontendUrl);
         }
         // Set output for use in other steps
         core.setOutput('run_id', runId);
@@ -25795,7 +25849,8 @@ async function run() {
             RUN_ID: runId,
             LOG_FILE: logFile,
             DEBUG_MODE: debugMode.toString(),
-            REMOTE_MONITORING: (enableBackend && backendUrl) ? 'true' : 'false'
+            REMOTE_MONITORING: (enableBackend && backendUrl) ? 'true' : 'false',
+            COLLECT_GC: collectGc.toString()
         };
         const child = (0, child_process_1.spawn)(scriptPath, args, {
             cwd: path.join(actionDir, '..'), // Run in the repository root, not dist/

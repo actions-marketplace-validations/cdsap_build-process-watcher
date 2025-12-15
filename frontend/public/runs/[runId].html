@@ -7,6 +7,29 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/config.js"></script>
+    <script>
+        // Set all links dynamically based on config
+        (function() {
+            const frontendUrl = window.BUILD_PROCESS_WATCHER_CONFIG?.frontendUrl || 'https://process-watcher.web.app';
+            document.addEventListener('DOMContentLoaded', function() {
+                // Set all "back home" links
+                document.querySelectorAll('.back-home-link, a[href="https://process-watcher.web.app"]').forEach(link => {
+                    link.href = frontendUrl;
+                });
+            });
+            // Also set immediately for elements that might exist before DOMContentLoaded
+            const setLinks = function() {
+                document.querySelectorAll('a[href="https://process-watcher.web.app"]').forEach(link => {
+                    link.href = frontendUrl;
+                });
+            };
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', setLinks);
+            } else {
+                setLinks();
+            }
+        })();
+    </script>
     <style>
         * {
             box-sizing: border-box;
@@ -73,6 +96,58 @@
             font-size: 1.125rem;
             font-weight: 600;
             color: #111827;
+        }
+
+        .process-info-section {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .process-info-section h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #111827;
+            margin-bottom: 1.5rem;
+        }
+
+        .process-info-card {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .process-info-card h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #111827;
+            margin-bottom: 0.5rem;
+        }
+
+        .process-info-card .process-meta {
+            font-size: 0.875rem;
+            color: #6b7280;
+            margin-bottom: 1rem;
+        }
+
+        .vm-flags-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .vm-flag {
+            background: #e5e7eb;
+            color: #374151;
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.375rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.875rem;
         }
 
         .status-in-progress {
@@ -256,7 +331,7 @@
                 <div class="error">
                     <h2>Invalid Run ID</h2>
                     <p>No run ID provided in the URL.</p>
-                    <a href="https://process-watcher.web.app" style="color: #2563eb;">Back to Home</a>
+                    <a href="#" class="back-home-link" style="color: #2563eb;">Back to Home</a>
                 </div>
             `;
         } else {
@@ -319,10 +394,36 @@
         function renderDashboard(runId, data) {
             const isFinished = data.finished;
             const samples = data.samples || [];
+            const processInfo = data.process_info || {};
             window.currentSamples = samples;
             
             const refreshStatus = isFinished ? 'Stopped' : `Active (${refreshInterval}s)`;
             const lastRefreshText = lastRefreshTime ? lastRefreshTime.toLocaleTimeString() : 'Never';
+            
+            // Render process info section
+            let processInfoHtml = '';
+            if (Object.keys(processInfo).length > 0) {
+                processInfoHtml = '<div class="process-info-section">';
+                processInfoHtml += '<h2>Process Information</h2>';
+                for (const [pid, info] of Object.entries(processInfo)) {
+                    const vmFlags = info.vm_flags || [];
+                    processInfoHtml += '<div class="process-info-card">';
+                    processInfoHtml += `<h3>${info.name || 'Unknown'}</h3>`;
+                    processInfoHtml += `<div class="process-meta">PID: ${pid}</div>`;
+                    if (vmFlags.length > 0) {
+                        processInfoHtml += '<div><strong>VM Flags:</strong></div>';
+                        processInfoHtml += '<div class="vm-flags-list">';
+                        vmFlags.forEach(flag => {
+                            processInfoHtml += `<span class="vm-flag">${escapeHtml(flag)}</span>`;
+                        });
+                        processInfoHtml += '</div>';
+                    } else {
+                        processInfoHtml += '<div class="process-meta">No VM flags available</div>';
+                    }
+                    processInfoHtml += '</div>';
+                }
+                processInfoHtml += '</div>';
+            }
             
             document.getElementById('content').innerHTML = `
                 <div class="run-info">
@@ -360,13 +461,15 @@
                     </div>
                     <div class="status-card">
                         <h3>Processes</h3>
-                        <p>${new Set(samples.map(s => s.Name)).size}</p>
+                        <p>${new Set(samples.map(s => `${s.Name}|${s.PID}`)).size}</p>
                     </div>
                     <div class="status-card">
                         <h3>Auto-refresh</h3>
                         <p>${refreshStatus}</p>
                     </div>
                 </div>
+
+                ${processInfoHtml}
 
                 <div class="chart-container">
                     <div class="downloads-toolbar">
@@ -380,10 +483,41 @@
                         <div id="chart" style="width: 100%; height: 500px;"></div>
                     </div>
                 </div>
+
+                ${hasGCData(samples) ? `
+                <div class="chart-container">
+                    <div class="downloads-toolbar">
+                        <button class="btn" id="btn-download-gc-png">Download GC PNG</button>
+                        <button class="btn" id="btn-download-gc-svg">Download GC SVG</button>
+                    </div>
+                    <h3>Garbage Collection Time Over Time</h3>
+                    <div class="chart-wrapper">
+                        <div id="gc-chart" style="width: 100%; height: 500px;"></div>
+                    </div>
+                </div>
+                ` : ''}
+                ${shouldShowRssHeapRatioChart(samples) ? `
+                <div class="chart-container">
+                    <div class="downloads-toolbar">
+                        <button class="btn" id="btn-download-rss-heap-png">Download Heap/RSS PNG</button>
+                        <button class="btn" id="btn-download-rss-heap-svg">Download Heap/RSS SVG</button>
+                    </div>
+                    <h3>Heap/RSS Ratio Over Time</h3>
+                    <div class="chart-wrapper">
+                        <div id="rss-heap-chart" style="width: 100%; height: 500px;"></div>
+                    </div>
+                </div>
+                ` : ''}
             `;
 
             if (samples.length > 0) {
                 renderChart(samples);
+                if (hasGCData(samples)) {
+                    renderGCChart(samples);
+                }
+                if (shouldShowRssHeapRatioChart(samples)) {
+                    renderRssHeapRatioChart(samples);
+                }
             }
 
             // Wire download buttons
@@ -391,33 +525,222 @@
             const btnSvg = document.getElementById('btn-download-svg');
             const btnJson = document.getElementById('btn-download-json');
             const btnCsv = document.getElementById('btn-download-csv');
+            const btnGcPng = document.getElementById('btn-download-gc-png');
+            const btnGcSvg = document.getElementById('btn-download-gc-svg');
+            const btnRssHeapPng = document.getElementById('btn-download-rss-heap-png');
+            const btnRssHeapSvg = document.getElementById('btn-download-rss-heap-svg');
 
             if (btnPng) btnPng.onclick = () => downloadChart('png');
             if (btnSvg) btnSvg.onclick = () => downloadChart('svg');
             if (btnJson) btnJson.onclick = () => downloadJson(runId);
             if (btnCsv) btnCsv.onclick = () => downloadCsv(runId);
+            if (btnGcPng) btnGcPng.onclick = () => downloadGCChart('png');
+            if (btnGcSvg) btnGcSvg.onclick = () => downloadGCChart('svg');
+            if (btnRssHeapPng) btnRssHeapPng.onclick = () => downloadRssHeapRatioChart('png');
+            if (btnRssHeapSvg) btnRssHeapSvg.onclick = () => downloadRssHeapRatioChart('svg');
+        }
+
+        function hasGCData(samples) {
+            return samples.some(sample => sample.GCTime !== undefined && sample.GCTime !== null && sample.GCTime > 0);
+        }
+
+        function shouldShowRssHeapRatioChart(samples) {
+            const uniqueTimestamps = new Set(samples.map(s => s.Timestamp));
+            return uniqueTimestamps.size > 10;
+        }
+
+        function renderGCChart(samples) {
+            // Process data for GC chart - group by both Name and PID to handle multiple processes with same name
+            const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
+            // Create unique process keys (Name + PID combination)
+            const processKeys = [...new Set(samples.map(s => `${s.Name}|${s.PID}`))];
+            
+            const traces = [];
+            const colors = ['#e74c3c', '#f39c12', '#9b59b6', '#2ecc71', '#3498db', '#e67e22'];
+            
+            // Create traces for each unique process (Name + PID combination)
+            processKeys.forEach((processKey, index) => {
+                const color = colors[index % colors.length];
+                const [processName, pid] = processKey.split('|');
+                
+                // GC time data - use null for timestamps where process doesn't exist yet
+                // Convert from milliseconds (stored in DB) to seconds (for display)
+                const gcData = timestamps.map(timestamp => {
+                    const sample = samples
+                        .filter(s => s.Name === processName && s.PID === pid && s.Timestamp === timestamp)
+                        [0];
+                    return sample && sample.GCTime !== undefined && sample.GCTime !== null && sample.GCTime > 0 ? sample.GCTime / 1000 : null;
+                });
+                
+                traces.push({
+                    x: timestamps.map(t => new Date(t)),
+                    y: gcData,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    name: `${processName} PID:${pid}`,
+                    line: { color: color, width: 3 },
+                    marker: { size: 6, color: color },
+                    connectgaps: false
+                });
+            });
+
+            // Detect if mobile
+            const isMobile = window.innerWidth < 768;
+            
+            const layout = {
+                title: isMobile ? '' : 'Garbage Collection Time Over Time',
+                xaxis: { 
+                    title: 'Time',
+                    tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
+                    tickangle: isMobile ? -45 : 0
+                },
+                yaxis: { title: 'GC Time (s)' },
+                showlegend: true,
+                legend: { 
+                    x: isMobile ? 0.5 : 1.02, 
+                    y: isMobile ? -0.2 : 1,
+                    xanchor: isMobile ? 'center' : 'left',
+                    orientation: isMobile ? 'h' : 'v'
+                },
+                margin: { 
+                    l: isMobile ? 50 : 60, 
+                    r: isMobile ? 20 : 100, 
+                    t: isMobile ? 20 : 40, 
+                    b: isMobile ? 80 : 60 
+                },
+                font: {
+                    size: isMobile ? 10 : 12
+                }
+            };
+
+            const config = {
+                responsive: true,
+                displayModeBar: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d', 'autoScale2d'],
+                toImageButtonOptions: {
+                    format: 'png',
+                    filename: `build-monitor-gc-${runId}`,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                }
+            };
+
+            Plotly.newPlot('gc-chart', traces, layout, config);
+            
+            // Handle window resize
+            window.addEventListener('resize', function() {
+                Plotly.Plots.resize('gc-chart');
+            });
+        }
+
+        function renderRssHeapRatioChart(samples) {
+            // Process data for Heap/RSS ratio chart - group by both Name and PID to handle multiple processes with same name
+            const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
+            // Create unique process keys (Name + PID combination)
+            const processKeys = [...new Set(samples.map(s => `${s.Name}|${s.PID}`))];
+            
+            const traces = [];
+            const colors = ['#e74c3c', '#f39c12', '#9b59b6', '#2ecc71', '#3498db', '#e67e22', '#1abc9c', '#e91e63'];
+            
+            // Create traces for each unique process (Name + PID combination)
+            processKeys.forEach((processKey, index) => {
+                const color = colors[index % colors.length];
+                const [processName, pid] = processKey.split('|');
+                
+                // Heap/RSS ratio data - use null for timestamps where process doesn't exist yet or RSS is 0
+                const ratioData = timestamps.map(timestamp => {
+                    const sample = samples
+                        .filter(s => s.Name === processName && s.PID === pid && s.Timestamp === timestamp)
+                        [0];
+                    if (sample && sample.RSS && sample.RSS > 0) {
+                        return sample.HeapUsed / sample.RSS;
+                    }
+                    return null;
+                });
+                
+                traces.push({
+                    x: timestamps.map(t => new Date(t)),
+                    y: ratioData,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    name: `${processName} PID:${pid}`,
+                    line: { color: color, width: 3 },
+                    marker: { size: 6, color: color },
+                    connectgaps: false
+                });
+            });
+
+            // Detect if mobile
+            const isMobile = window.innerWidth < 768;
+            
+            const layout = {
+                title: isMobile ? '' : 'Heap/RSS Ratio Over Time',
+                xaxis: { 
+                    title: 'Time',
+                    tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
+                    tickangle: isMobile ? -45 : 0
+                },
+                yaxis: { title: 'Heap/RSS Ratio' },
+                showlegend: true,
+                legend: { 
+                    x: isMobile ? 0.5 : 1.02, 
+                    y: isMobile ? -0.2 : 1,
+                    xanchor: isMobile ? 'center' : 'left',
+                    orientation: isMobile ? 'h' : 'v'
+                },
+                margin: { 
+                    l: isMobile ? 50 : 60, 
+                    r: isMobile ? 20 : 100, 
+                    t: isMobile ? 20 : 40, 
+                    b: isMobile ? 80 : 60 
+                },
+                font: {
+                    size: isMobile ? 10 : 12
+                }
+            };
+
+            const config = {
+                responsive: true,
+                displayModeBar: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d', 'autoScale2d'],
+                toImageButtonOptions: {
+                    format: 'png',
+                    filename: `build-monitor-rss-heap-${runId}`,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                }
+            };
+
+            Plotly.newPlot('rss-heap-chart', traces, layout, config);
+            
+            // Handle window resize
+            window.addEventListener('resize', function() {
+                Plotly.Plots.resize('rss-heap-chart');
+            });
         }
 
         function renderChart(samples) {
-            // Process data for chart
+            // Process data for chart - group by both Name and PID to handle multiple processes with same name
             const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
-            const processes = [...new Set(samples.map(s => `${s.Name} (PID: ${s.PID})`))];
-            const processNames = [...new Set(samples.map(s => s.Name))];
+            // Create unique process keys (Name + PID combination)
+            const processKeys = [...new Set(samples.map(s => `${s.Name}|${s.PID}`))];
             
             const traces = [];
             const colors = ['#3498db', '#e74c3c', '#9b59b6', '#2ecc71', '#f39c12', '#e67e22'];
             
-            // Create traces for each process
-            processNames.forEach((processName, index) => {
+            // Create traces for each unique process (Name + PID combination)
+            processKeys.forEach((processKey, index) => {
                 const color = colors[index % colors.length];
-                // Get the PID for this process (assuming all samples for same process have same PID)
-                const processSamples = samples.filter(s => s.Name === processName);
-                const pid = processSamples.length > 0 ? processSamples[0].PID : 'unknown';
+                const [processName, pid] = processKey.split('|');
                 
                 // RSS data - use null for timestamps where process doesn't exist yet
                 const rssData = timestamps.map(timestamp => {
                     const sample = samples
-                        .filter(s => s.Name === processName && s.Timestamp === timestamp)
+                        .filter(s => s.Name === processName && s.PID === pid && s.Timestamp === timestamp)
                         [0];
                     return sample ? sample.RSS : null;  // null means "no data" - line won't appear
                 });
@@ -435,7 +758,7 @@
                 // Heap data - use null for timestamps where process doesn't exist yet
                 const heapData = timestamps.map(timestamp => {
                     const sample = samples
-                        .filter(s => s.Name === processName && s.Timestamp === timestamp)
+                        .filter(s => s.Name === processName && s.PID === pid && s.Timestamp === timestamp)
                         [0];
                     return sample ? sample.HeapUsed : null;  // null means "no data" - line won't appear
                 });
@@ -454,9 +777,10 @@
             // Add total memory trace - only sum processes that exist at this exact timestamp
             const totalData = timestamps.map(timestamp => {
                 let total = 0;
-                processNames.forEach(processName => {
+                processKeys.forEach(processKey => {
+                    const [processName, pid] = processKey.split('|');
                     const sample = samples
-                        .filter(s => s.Name === processName && s.Timestamp === timestamp)
+                        .filter(s => s.Name === processName && s.PID === pid && s.Timestamp === timestamp)
                         [0];
                     if (sample) total += sample.RSS;
                 });
@@ -548,6 +872,54 @@
             }
         }
 
+        async function downloadGCChart(format) {
+            try {
+                const chart = document.getElementById('gc-chart');
+                const isMobile = window.innerWidth < 768;
+                const filename = `build-monitor-gc-${runId}`;
+                const opts = {
+                    format: format,
+                    filename: filename,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                };
+                const url = await Plotly.toImage(chart, opts);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${filename}.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            } catch (e) {
+                console.error('Failed to export GC chart:', e);
+            }
+        }
+
+        async function downloadRssHeapRatioChart(format) {
+            try {
+                const chart = document.getElementById('rss-heap-chart');
+                const isMobile = window.innerWidth < 768;
+                const filename = `build-monitor-rss-heap-${runId}`;
+                const opts = {
+                    format: format,
+                    filename: filename,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                };
+                const url = await Plotly.toImage(chart, opts);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${filename}.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            } catch (e) {
+                console.error('Failed to export Heap/RSS ratio chart:', e);
+            }
+        }
+
         function downloadJson(runId) {
             try {
                 const data = window.currentRunData || {};
@@ -569,16 +941,26 @@
             try {
                 const samples = window.currentSamples || [];
                 if (!samples.length) return;
-                const header = ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb'];
-                const rows = samples.map(s => [
-                    s.Timestamp,
-                    s.ElapsedTime,
-                    s.PID,
-                    s.Name,
-                    s.RSS,
-                    s.HeapUsed,
-                    s.HeapCap
-                ]);
+                const hasGC = hasGCData(samples);
+                const header = hasGC ? 
+                    ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb','gc_time_s'] :
+                    ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb'];
+                const rows = samples.map(s => {
+                    const baseRow = [
+                        s.Timestamp,
+                        s.ElapsedTime,
+                        s.PID,
+                        s.Name,
+                        s.RSS,
+                        s.HeapUsed,
+                        s.HeapCap
+                    ];
+                    if (hasGC) {
+                        // Convert from milliseconds (stored in DB) to seconds (for display)
+                        baseRow.push(s.GCTime ? (s.GCTime / 1000).toFixed(3) : 0);
+                    }
+                    return baseRow;
+                });
                 const csv = [header.join(','), ...rows.map(r => r.map(escapeCsv).join(','))].join('\n');
                 const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
                 const url = URL.createObjectURL(blob);
@@ -592,6 +974,13 @@
             } catch (e) {
                 console.error('Failed to download CSV:', e);
             }
+        }
+
+        function escapeHtml(str) {
+            if (str === undefined || str === null) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
         }
 
         function escapeCsv(value) {

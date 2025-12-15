@@ -12,6 +12,7 @@ on:
       - 'frontend/**'
       - '.github/workflows/test-frontend.yml'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   validate:

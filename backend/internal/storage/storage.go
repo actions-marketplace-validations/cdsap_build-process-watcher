@@ -61,7 +61,7 @@ func (c *Client) GetRun(runID string) (*models.RunDoc, error) {
 // StoreSamples stores samples for a run
 func (c *Client) StoreSamples(runID string, samples []models.Sample) error {
 	log.Printf("🔄 Storing %d samples for run ID: %s", len(samples), runID)
-	
+
 	doc := c.firestore.Collection("runs").Doc(runID)
 
 	// Get existing document or create new one
@@ -79,11 +79,14 @@ func (c *Client) StoreSamples(runID string, samples []models.Sample) error {
 		}
 		log.Printf("📄 Found existing document with %d samples", len(runDoc.Samples))
 	} else {
+		now := time.Now()
 		runDoc = models.RunDoc{
-			ID:        runID,
-			RunID:     runID,
-			StartTime: time.Now(),
-			CreatedAt: time.Now(),
+			ID:                 runID,
+			RunID:              runID,
+			StartTime:          now,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+			UpdatedAtTimestamp: ToMillis(now), // Set timestamp on creation
 		}
 		log.Printf("📄 Creating new document for run ID: %s", runID)
 	}
@@ -101,9 +104,94 @@ func (c *Client) StoreSamples(runID string, samples []models.Sample) error {
 		log.Printf("❌ Error saving document to Firestore: %v", err)
 		return err
 	}
-	
+
 	log.Printf("✅ Successfully stored %d samples for run ID: %s", len(samples), runID)
 	return nil
+}
+
+// StoreProcessInfo stores or updates process information (VM flags) for a process in the processes collection
+func (c *Client) StoreProcessInfo(runID string, processInfo models.ProcessInfo) error {
+	log.Printf("🔄 Storing process info for PID: %s (Name: %s) in run ID: %s", processInfo.PID, processInfo.Name, runID)
+
+	doc := c.firestore.Collection("processes").Doc(runID)
+
+	// Get existing document or create new one
+	snapshot, err := doc.Get(c.ctx)
+	if err != nil && !strings.Contains(err.Error(), "not found") {
+		return fmt.Errorf("failed to get process document: %w", err)
+	}
+
+	var processDoc models.ProcessDoc
+	if snapshot != nil && snapshot.Exists() {
+		if err := snapshot.DataTo(&processDoc); err != nil {
+			log.Printf("❌ Error parsing process document data: %v", err)
+			return fmt.Errorf("failed to parse document data: %w", err)
+		}
+		log.Printf("📄 Found existing process document for run ID: %s", runID)
+	} else {
+		now := time.Now()
+		processDoc = models.ProcessDoc{
+			RunID:              runID,
+			ProcessInfo:        make(map[string]models.ProcessInfo),
+			CreatedAt:          now,
+			UpdatedAt:          now,
+			UpdatedAtTimestamp: ToMillis(now),
+		}
+		log.Printf("📄 Creating new process document for run ID: %s", runID)
+	}
+
+	// Initialize ProcessInfo map if nil
+	if processDoc.ProcessInfo == nil {
+		processDoc.ProcessInfo = make(map[string]models.ProcessInfo)
+	}
+
+	// Store or update process info (only if not already exists, or update if exists)
+	if _, exists := processDoc.ProcessInfo[processInfo.PID]; exists {
+		log.Printf("📝 Updating existing process info for PID: %s", processInfo.PID)
+		// Replace with new process info
+		processDoc.ProcessInfo[processInfo.PID] = processInfo
+	} else {
+		log.Printf("➕ Adding new process info for PID: %s", processInfo.PID)
+		processDoc.ProcessInfo[processInfo.PID] = processInfo
+	}
+
+	now := time.Now()
+	processDoc.UpdatedAt = now
+	processDoc.UpdatedAtTimestamp = ToMillis(now)
+
+	// Save back to Firestore
+	_, err = doc.Set(c.ctx, processDoc)
+	if err != nil {
+		log.Printf("❌ Error saving process info to Firestore: %v", err)
+		return err
+	}
+
+	log.Printf("✅ Successfully stored process info for PID: %s in run ID: %s", processInfo.PID, runID)
+	return nil
+}
+
+// GetProcesses retrieves process information for a run from the processes collection
+func (c *Client) GetProcesses(runID string) (*models.ProcessDoc, error) {
+	doc := c.firestore.Collection("processes").Doc(runID)
+	snapshot, err := doc.Get(c.ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if !snapshot.Exists() {
+		// Return empty ProcessDoc if not found (not an error)
+		return &models.ProcessDoc{
+			RunID:       runID,
+			ProcessInfo: make(map[string]models.ProcessInfo),
+		}, nil
+	}
+
+	var processDoc models.ProcessDoc
+	if err := snapshot.DataTo(&processDoc); err != nil {
+		return nil, err
+	}
+
+	return &processDoc, nil
 }
 
 // MarkRunAsFinished marks a run as finished
@@ -135,6 +223,8 @@ func (c *Client) MarkRunAsFinished(runID string) error {
 	runDoc.FinishedAt = now
 	runDoc.UpdatedAt = now
 	runDoc.UpdatedAtTimestamp = ToMillis(now) // Store Unix millis for timezone-independent queries
+	// Set expire_at to 3 hours from finish time for Firestore TTL
+	runDoc.ExpireAt = now.Add(3 * time.Hour)
 
 	// Update in Firestore
 	_, err = doc.Set(c.ctx, runDoc)
@@ -148,7 +238,7 @@ func (c *Client) MarkRunAsFinished(runID string) error {
 // FindStaleRuns finds runs that haven't been updated within the timeout period
 func (c *Client) FindStaleRuns(timeout time.Duration) ([]string, error) {
 	iter := c.firestore.Collection("runs").Documents(c.ctx)
-	
+
 	var staleRuns []string
 	for {
 		doc, err := iter.Next()
@@ -181,16 +271,17 @@ func (c *Client) FindStaleRuns(timeout time.Duration) ([]string, error) {
 }
 
 // DeleteOldRuns deletes runs older than the retention period
+// Uses finished_at if available, otherwise uses created_at + retention period
 func (c *Client) DeleteOldRuns(retentionPeriod time.Duration) ([]string, error) {
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	cutoffTimestamp := ToMillis(cutoffTime)
-	
+
 	log.Printf("🗑️ Deleting data older than: %v (timestamp: %d)", cutoffTime, cutoffTimestamp)
-	
-	// Query for old runs using timestamp field for timezone-independent comparison
-	query := c.firestore.Collection("runs").Where("updated_at_timestamp", "<", cutoffTimestamp)
-	iter := query.Documents(c.ctx)
-	
+
+	// Get all runs - we need to check each one individually because we need to check
+	// finished_at if available, otherwise created_at
+	iter := c.firestore.Collection("runs").Documents(c.ctx)
+
 	var deletedRuns []string
 	for {
 		doc, err := iter.Next()
@@ -200,18 +291,37 @@ func (c *Client) DeleteOldRuns(retentionPeriod time.Duration) ([]string, error) 
 		if err != nil {
 			return deletedRuns, err
 		}
-		
-		// Delete the document
-		_, err = doc.Ref.Delete(c.ctx)
-		if err != nil {
-			log.Printf("❌ Error deleting old run %s: %v", doc.Ref.ID, err)
+
+		var runDoc models.RunDoc
+		if err := doc.DataTo(&runDoc); err != nil {
+			log.Printf("❌ Error parsing run document %s: %v", doc.Ref.ID, err)
 			continue
 		}
-		
-		deletedRuns = append(deletedRuns, doc.Ref.ID)
-		log.Printf("🗑️ Deleted old run: %s", doc.Ref.ID)
+
+		// Determine the timestamp to use for comparison
+		var compareTime time.Time
+		if !runDoc.FinishedAt.IsZero() {
+			// Use finished_at if the run is finished
+			compareTime = runDoc.FinishedAt
+		} else {
+			// Use created_at if the run never finished
+			compareTime = runDoc.CreatedAt
+		}
+
+		// Check if this run should be deleted (older than retention period)
+		if compareTime.Before(cutoffTime) {
+			// Delete the document
+			_, err = doc.Ref.Delete(c.ctx)
+			if err != nil {
+				log.Printf("❌ Error deleting old run %s: %v", doc.Ref.ID, err)
+				continue
+			}
+
+			deletedRuns = append(deletedRuns, doc.Ref.ID)
+			log.Printf("🗑️ Deleted old run: %s (created: %v, finished: %v)", doc.Ref.ID, runDoc.CreatedAt, runDoc.FinishedAt)
+		}
 	}
-	
+
 	return deletedRuns, nil
 }
 
@@ -219,7 +329,7 @@ func (c *Client) DeleteOldRuns(retentionPeriod time.Duration) ([]string, error) 
 func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 	var samples []models.Sample
 	lines := strings.Split(strings.TrimSpace(data), "\n")
-	
+
 	log.Printf("=== PARSING DATA ===")
 	log.Printf("Raw data: %q", data)
 	log.Printf("Split into %d lines", len(lines))
@@ -234,8 +344,8 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 
 		parts := strings.Split(line, "|")
 		log.Printf("Split into %d parts: %v", len(parts), parts)
-		if len(parts) != 6 {
-			log.Printf("Skipping line %d: expected 6 parts, got %d", i, len(parts))
+		if len(parts) != 6 && len(parts) != 7 {
+			log.Printf("Skipping line %d: expected 6 or 7 parts, got %d", i, len(parts))
 			continue
 		}
 
@@ -288,6 +398,38 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 		}
 		rss := int(rssFloat)
 
+		// Parse GC time if present (7th part)
+		// Format can be either "0.234s" (seconds) or legacy "234ms" (milliseconds)
+		var gcTime int
+		if len(parts) == 7 {
+			gcTimeStr := parts[6]
+			isSeconds := strings.HasSuffix(gcTimeStr, "s")
+			isMilliseconds := strings.HasSuffix(gcTimeStr, "ms")
+
+			// Remove suffix (either "s" or "ms")
+			if isSeconds {
+				gcTimeStr = strings.TrimSuffix(gcTimeStr, "s")
+			} else if isMilliseconds {
+				gcTimeStr = strings.TrimSuffix(gcTimeStr, "ms")
+			}
+
+			if gcTimeStr != "N/A" && gcTimeStr != "" {
+				gcTimeFloat, err := strconv.ParseFloat(gcTimeStr, 64)
+				if err != nil {
+					log.Printf("Warning: GC time parsing failed: %v, using 0", err)
+					gcTime = 0
+				} else {
+					// If original format had "s" suffix, convert seconds to milliseconds
+					// If original format had "ms" suffix, it's already in milliseconds
+					if isSeconds {
+						gcTime = int(gcTimeFloat * 1000) // Convert seconds to milliseconds
+					} else {
+						gcTime = int(gcTimeFloat) // Already in milliseconds
+					}
+				}
+			}
+		}
+
 		// Calculate consistent timestamp using startTime + elapsedTime
 		// This ensures all samples in the same monitoring cycle have the same timestamp
 		timestamp := startTime.Add(time.Duration(elapsedTime) * time.Second)
@@ -300,6 +442,7 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 			HeapUsed:    heapUsed,
 			HeapCap:     heapCap,
 			RSS:         rss,
+			GCTime:      gcTime,
 		}
 
 		log.Printf("Created sample: %+v", sample)
@@ -313,4 +456,3 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 func ToMillis(t time.Time) int64 {
 	return t.UnixNano() / int64(time.Millisecond)
 }
-
