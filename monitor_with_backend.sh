@@ -3,7 +3,7 @@
 set -euo pipefail  # safer scripting: exit on error, unset vars, pipe errors
 
 INTERVAL="${1:-5}"
-PATTERNS=("GradleDaemon" "KotlinCompileDaemon" "GradleWorkerMain" "gradle-wrapper.jar")
+PATTERNS=("GradleDaemon" "KotlinCompileDaemon" "GradleWorkerMain")
 LOG_FILE="build_process_watcher.log"
 PID_FILE="monitor.pid"
 

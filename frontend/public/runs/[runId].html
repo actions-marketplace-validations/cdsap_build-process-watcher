@@ -400,6 +400,41 @@
             const refreshStatus = isFinished ? 'Stopped' : `Active (${refreshInterval}s)`;
             const lastRefreshText = lastRefreshTime ? lastRefreshTime.toLocaleTimeString() : 'Never';
             
+            // Calculate metrics for each process and overall
+            let maxRssAllProcesses = 0;
+            const processMetrics = {};
+            
+            // Calculate metrics per process
+            for (const [pid, info] of Object.entries(processInfo)) {
+                const processSamples = samples.filter(s => s.PID === pid);
+                let maxRss = 0;
+                let maxHeap = 0;
+                let totalGCTime = 0;
+                
+                processSamples.forEach(sample => {
+                    if (sample.RSS && sample.RSS > maxRss) {
+                        maxRss = sample.RSS;
+                    }
+                    if (sample.HeapUsed && sample.HeapUsed > maxHeap) {
+                        maxHeap = sample.HeapUsed;
+                    }
+                    if (sample.GCTime) {
+                        // GCTime is stored in milliseconds, convert to seconds for display
+                        totalGCTime += sample.GCTime / 1000;
+                    }
+                });
+                
+                processMetrics[pid] = {
+                    maxRss: maxRss,
+                    maxHeap: maxHeap,
+                    totalGCTime: totalGCTime
+                };
+                
+                if (maxRss > maxRssAllProcesses) {
+                    maxRssAllProcesses = maxRss;
+                }
+            }
+            
             // Render process info section
             let processInfoHtml = '';
             if (Object.keys(processInfo).length > 0) {
@@ -407,9 +442,20 @@
                 processInfoHtml += '<h2>Process Information</h2>';
                 for (const [pid, info] of Object.entries(processInfo)) {
                     const vmFlags = info.vm_flags || [];
+                    const metrics = processMetrics[pid] || { maxRss: 0, maxHeap: 0, totalGCTime: 0 };
                     processInfoHtml += '<div class="process-info-card">';
                     processInfoHtml += `<h3>${info.name || 'Unknown'}</h3>`;
                     processInfoHtml += `<div class="process-meta">PID: ${pid}</div>`;
+                    
+                    // Add metrics
+                    processInfoHtml += '<div style="margin: 1rem 0; padding: 0.75rem; background: #f0f9ff; border-radius: 0.5rem; border-left: 3px solid #2563eb;">';
+                    processInfoHtml += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 0.5rem;">';
+                    processInfoHtml += `<div><strong>Max RSS:</strong> ${metrics.maxRss > 0 ? metrics.maxRss.toFixed(1) + ' MB' : 'N/A'}</div>`;
+                    processInfoHtml += `<div><strong>Max Heap:</strong> ${metrics.maxHeap > 0 ? metrics.maxHeap.toFixed(1) + ' MB' : 'N/A'}</div>`;
+                    processInfoHtml += `<div><strong>Total GC Time:</strong> ${metrics.totalGCTime > 0 ? metrics.totalGCTime.toFixed(3) + ' s' : 'N/A'}</div>`;
+                    processInfoHtml += '</div>';
+                    processInfoHtml += '</div>';
+                    
                     if (vmFlags.length > 0) {
                         processInfoHtml += '<div><strong>VM Flags:</strong></div>';
                         processInfoHtml += '<div class="vm-flags-list">';
@@ -422,6 +468,15 @@
                     }
                     processInfoHtml += '</div>';
                 }
+                
+                // Add summary section for max RSS across all processes
+                if (maxRssAllProcesses > 0) {
+                    processInfoHtml += '<div class="process-info-card" style="background: #fef3c7; border-left: 3px solid #f59e0b;">';
+                    processInfoHtml += '<h3>Overall Summary</h3>';
+                    processInfoHtml += `<div style="font-size: 1.125rem; font-weight: 600; color: #92400e;">Max RSS (All Processes): ${maxRssAllProcesses.toFixed(1)} MB</div>`;
+                    processInfoHtml += '</div>';
+                }
+                
                 processInfoHtml += '</div>';
             }
             
@@ -469,8 +524,6 @@
                     </div>
                 </div>
 
-                ${processInfoHtml}
-
                 <div class="chart-container">
                     <div class="downloads-toolbar">
                         <button class="btn" id="btn-download-png">Download PNG</button>
@@ -508,6 +561,8 @@
                     </div>
                 </div>
                 ` : ''}
+
+                ${processInfoHtml}
             `;
 
             if (samples.length > 0) {
