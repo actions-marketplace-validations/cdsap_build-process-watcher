@@ -537,22 +537,52 @@ async function run() {
 
         // Print summary statistics if available (for backend mode)
         const successfulCallsFile = path.join(actionDir, '..', 'successful_calls_count.txt');
+        const failedCallsFile = path.join(actionDir, '..', 'failed_calls_count.txt');
+        
+        let successfulCount = 0;
+        let failedCount = 0;
+        let hasStats = false;
+        
         if (fs.existsSync(successfulCallsFile)) {
             try {
                 const successfulCalls = fs.readFileSync(successfulCallsFile, 'utf8').trim();
                 const count = parseInt(successfulCalls, 10);
                 if (!isNaN(count)) {
-                    console.log('');
-                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-                    console.log('📊 Build Process Watcher - Summary Statistics');
-                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-                    console.log(`✅ Total successful backend calls: ${count}`);
-                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-                    console.log('');
+                    successfulCount = count;
+                    hasStats = true;
                 }
             } catch (error) {
                 // Silently ignore errors reading the file
             }
+        }
+        
+        if (fs.existsSync(failedCallsFile)) {
+            try {
+                const failedCalls = fs.readFileSync(failedCallsFile, 'utf8').trim();
+                const count = parseInt(failedCalls, 10);
+                if (!isNaN(count)) {
+                    failedCount = count;
+                    hasStats = true;
+                }
+            } catch (error) {
+                // Silently ignore errors reading the file
+            }
+        }
+        
+        if (hasStats) {
+            const totalCalls = successfulCount + failedCount;
+            const successRate = totalCalls > 0 ? ((successfulCount / totalCalls) * 100).toFixed(1) : '0.0';
+            
+            console.log('');
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log('📊 Build Process Watcher - Summary Statistics');
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log(`✅ Total successful backend calls: ${successfulCount}`);
+            console.log(`❌ Total failed backend calls: ${failedCount}`);
+            console.log(`📈 Total calls: ${totalCalls}`);
+            console.log(`📊 Success rate: ${successRate}%`);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log('');
         }
 
         // Check if we have a log file

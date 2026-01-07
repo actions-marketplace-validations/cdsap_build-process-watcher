@@ -26,8 +26,9 @@ SCRIPT_DEBUG_LOG="script_debug.log"
 AUTH_TOKEN=""
 TOKEN_EXPIRES_AT=""
 
-# Global counter for successful backend calls
+# Global counters for backend calls
 TOTAL_SUCCESSFUL_CALLS=0
+TOTAL_FAILED_CALLS=0
 
 # Check debug mode
 DEBUG_MODE="${DEBUG_MODE:-false}"
@@ -320,7 +321,8 @@ EOF
         fi
         return 0
     else
-        log_script "send_process_info_to_backend: FAILED for PID $pid (curl_exit: $curl_exit_code, http: $http_code)"
+        TOTAL_FAILED_CALLS=$((TOTAL_FAILED_CALLS + 1))
+        log_script "send_process_info_to_backend: FAILED for PID $pid (curl_exit: $curl_exit_code, http: $http_code) (total failed calls: $TOTAL_FAILED_CALLS)"
         if [ "$DEBUG_MODE" = "true" ]; then
             echo "⚠️  [$(date '+%H:%M:%S')] Failed to send process info for PID: $pid (HTTP $http_code)" >&2
         fi
@@ -466,6 +468,8 @@ EOF
                     echo "✅ [$(date '+%H:%M:%S')] SUCCESS (retry): Sent data for $pid ($name) (HTTP $http_code)" >&2
                 fi
             else
+                TOTAL_FAILED_CALLS=$((TOTAL_FAILED_CALLS + 1))
+                log_script "send_to_backend: FAILED (retry) for PID $pid ($name) (total failed calls: $TOTAL_FAILED_CALLS)"
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ FAILED (retry): Failed to send data for $pid ($name) at $timestamp" >> "$BACKEND_DEBUG_LOG"
                 echo "HTTP code: $http_code" >> "$BACKEND_DEBUG_LOG"
                 echo "Response: $response_body" >> "$BACKEND_DEBUG_LOG"
@@ -473,7 +477,8 @@ EOF
             fi
         fi
     else
-        log_script "send_to_backend: FAILED for PID $pid ($name) - curl_exit: $curl_exit_code, http: $http_code"
+        TOTAL_FAILED_CALLS=$((TOTAL_FAILED_CALLS + 1))
+        log_script "send_to_backend: FAILED for PID $pid ($name) - curl_exit: $curl_exit_code, http: $http_code (total failed calls: $TOTAL_FAILED_CALLS)"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ FAILED: Failed to send data for $pid ($name) at $timestamp" >> "$BACKEND_DEBUG_LOG"
         echo "Curl exit code: $curl_exit_code" >> "$BACKEND_DEBUG_LOG"
         echo "HTTP code: $http_code" >> "$BACKEND_DEBUG_LOG"
@@ -498,7 +503,8 @@ fi
 # Function to save summary statistics to file for cleanup script
 save_summary() {
     echo "$TOTAL_SUCCESSFUL_CALLS" > "successful_calls_count.txt"
-    log_script "SUMMARY: Total successful backend calls: $TOTAL_SUCCESSFUL_CALLS (saved to successful_calls_count.txt)"
+    echo "$TOTAL_FAILED_CALLS" > "failed_calls_count.txt"
+    log_script "SUMMARY: Total successful backend calls: $TOTAL_SUCCESSFUL_CALLS, failed: $TOTAL_FAILED_CALLS (saved to files)"
 }
 
 # Trap graceful shutdown (SIGTERM, SIGINT)
@@ -613,6 +619,10 @@ log_script "Entering main monitoring loop"
 ITERATION=0
 
 while true; do
+  # Wrap entire iteration in error handling to prevent script from exiting
+  # Disable set -e for the iteration body, then re-enable it
+  set +e
+  
   ITERATION=$((ITERATION + 1))
   CURRENT_TIME=$(date +%s)
   ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
@@ -681,6 +691,7 @@ while true; do
           
           # Get VM flags for this process
           log_script "Calling get_vm_flags for PID $PID"
+          # set -e is already disabled for the iteration, so we can safely capture exit code
           VM_FLAGS_JSON=$(get_vm_flags "$PID")
           vm_flags_exit=$?
           log_script "get_vm_flags returned exit code: $vm_flags_exit"
@@ -692,8 +703,11 @@ while true; do
             fi
             # Send process info to backend
             log_script "Calling send_process_info_to_backend for PID $PID"
-            send_process_info_to_backend "$PID" "$NAME" "$VM_FLAGS_JSON"
-            log_script "send_process_info_to_backend completed for PID $PID"
+            if send_process_info_to_backend "$PID" "$NAME" "$VM_FLAGS_JSON"; then
+              log_script "send_process_info_to_backend succeeded for PID $PID"
+            else
+              log_script "send_process_info_to_backend failed for PID $PID (continuing anyway)"
+            fi
           else
             log_script "Could not get VM flags for PID $PID (exit: $vm_flags_exit, json length: ${#VM_FLAGS_JSON})"
             if [ "$DEBUG_MODE" = "true" ]; then
@@ -827,4 +841,7 @@ while true; do
   log_script "Sleeping for $INTERVAL seconds before next iteration"
   sleep "$INTERVAL"
   log_script "Woke up from sleep, starting next iteration"
+  
+  # Re-enable set -e for the next iteration
+  set -e
 done
