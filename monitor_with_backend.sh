@@ -26,6 +26,9 @@ SCRIPT_DEBUG_LOG="script_debug.log"
 AUTH_TOKEN=""
 TOKEN_EXPIRES_AT=""
 
+# Global counter for successful backend calls
+TOTAL_SUCCESSFUL_CALLS=0
+
 # Check debug mode
 DEBUG_MODE="${DEBUG_MODE:-false}"
 
@@ -123,7 +126,7 @@ get_auth_token() {
     
     log_script "get_auth_token: curl exit code: $curl_exit"
     
-    http_code=$(echo "$auth_response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
+    http_code=$(echo "$auth_response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2 || echo "")
     # Extract response body, removing curl timing info and HTTP_CODE line
     local response_body=$(echo "$auth_response" | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//' | sed '/^HTTP_CODE:/d' | sed '/^TIME_TOTAL:/d' | sed '/^TIME_CONNECT:/d')
     
@@ -137,8 +140,8 @@ get_auth_token() {
             TOKEN_EXPIRES_AT=$(echo "$response_body" | jq -r '.expires_at')
         else
             # Fallback parsing without jq
-            AUTH_TOKEN=$(echo "$response_body" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-            TOKEN_EXPIRES_AT=$(echo "$response_body" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4)
+            AUTH_TOKEN=$(echo "$response_body" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "")
+            TOKEN_EXPIRES_AT=$(echo "$response_body" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4 || echo "")
         fi
         
         if [ "$DEBUG_MODE" = "true" ]; then
@@ -310,7 +313,8 @@ EOF
     log_script "send_process_info_to_backend: response body: '$response_body'"
     
     if [ "$curl_exit_code" -eq 0 ] && [ "$http_code" = "200" ]; then
-        log_script "send_process_info_to_backend: SUCCESS for PID $pid"
+        TOTAL_SUCCESSFUL_CALLS=$((TOTAL_SUCCESSFUL_CALLS + 1))
+        log_script "send_process_info_to_backend: SUCCESS for PID $pid (total successful calls: $TOTAL_SUCCESSFUL_CALLS)"
         if [ "$DEBUG_MODE" = "true" ]; then
             echo "✅ [$(date '+%H:%M:%S')] Process info sent successfully for PID: $pid" >&2
         fi
@@ -398,7 +402,8 @@ EOF
     curl_exit_code=$?
     
     # Extract HTTP code, timing info, and response
-    local http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2)
+    # Use || true to prevent grep failures from exiting script with set -e
+    local http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2 || echo "")
     local time_total=$(echo "$curl_output" | grep -o "TIME_TOTAL:[0-9.]*" | cut -d: -f2 || echo "N/A")
     local time_connect=$(echo "$curl_output" | grep -o "TIME_CONNECT:[0-9.]*" | cut -d: -f2 || echo "N/A")
     # Extract response body, removing all curl timing info and HTTP_CODE lines
@@ -424,7 +429,8 @@ EOF
     log_script "send_to_backend: response body: '$response_body'"
     
     if [ $curl_exit_code -eq 0 ] && [ "$http_code" = "200" ]; then
-        log_script "send_to_backend: SUCCESS for PID $pid ($name)"
+        TOTAL_SUCCESSFUL_CALLS=$((TOTAL_SUCCESSFUL_CALLS + 1))
+        log_script "send_to_backend: SUCCESS for PID $pid ($name) (total successful calls: $TOTAL_SUCCESSFUL_CALLS)"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ SUCCESS: Sent data for $pid ($name) at $timestamp (HTTP $http_code)" >> "$BACKEND_DEBUG_LOG"
         if [ "$DEBUG_MODE" = "true" ]; then
             echo "✅ [$(date '+%H:%M:%S')] SUCCESS: Sent data for $pid ($name) (HTTP $http_code)" >&2
@@ -448,11 +454,13 @@ EOF
                 -H "Authorization: Bearer $AUTH_TOKEN" \
                 -d "$json_payload" 2>&1)
             curl_exit_code=$?
-            http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2)
+            http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2 || echo "")
             # Extract response body, removing all curl timing info and HTTP_CODE lines
             response_body=$(echo "$curl_output" | sed '/^HTTP_CODE:/d' | sed '/^TIME_TOTAL:/d' | sed '/^TIME_CONNECT:/d' | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//')
             
             if [ $curl_exit_code -eq 0 ] && [ "$http_code" = "200" ]; then
+                TOTAL_SUCCESSFUL_CALLS=$((TOTAL_SUCCESSFUL_CALLS + 1))
+                log_script "send_to_backend: SUCCESS (retry) for PID $pid ($name) (total successful calls: $TOTAL_SUCCESSFUL_CALLS)"
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ SUCCESS (retry): Sent data for $pid ($name) at $timestamp (HTTP $http_code)" >> "$BACKEND_DEBUG_LOG"
                 if [ "$DEBUG_MODE" = "true" ]; then
                     echo "✅ [$(date '+%H:%M:%S')] SUCCESS (retry): Sent data for $pid ($name) (HTTP $http_code)" >&2
@@ -487,10 +495,16 @@ if ! get_auth_token; then
     echo "⚠️  Failed to get initial authentication token - will retry on first send" >&2
 fi
 
+# Function to save summary statistics to file for cleanup script
+save_summary() {
+    echo "$TOTAL_SUCCESSFUL_CALLS" > "successful_calls_count.txt"
+    log_script "SUMMARY: Total successful backend calls: $TOTAL_SUCCESSFUL_CALLS (saved to successful_calls_count.txt)"
+}
+
 # Trap graceful shutdown (SIGTERM, SIGINT)
 # Mark that cleanup is being called from trap (so it doesn't upload artifacts)
-trap 'echo "💥 Monitor received termination signal. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js; exit' TERM INT
-trap 'echo "🧹 Monitor exiting normally. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js' EXIT
+trap 'save_summary; echo "💥 Monitor received termination signal. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js; exit' TERM INT
+trap 'save_summary; echo "🧹 Monitor exiting normally. Running cleanup."; CLEANUP_FROM_TRAP=true node dist/cleanup.js' EXIT
 
 # Create PID file
 echo $$ > "$PID_FILE"
@@ -610,7 +624,7 @@ while true; do
   if [ $((ITERATION % 10)) -eq 0 ]; then
     log_script "Network connectivity check (iteration $ITERATION)"
     if command -v curl >/dev/null 2>&1; then
-      local connectivity_test
+      # Don't use 'local' here - we're not in a function
       connectivity_test=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "$BACKEND_URL/healthz" 2>&1 || echo "FAILED")
       log_script "Backend health check result: $connectivity_test"
       if [ "$connectivity_test" != "200" ] && [ "$connectivity_test" != "FAILED" ]; then

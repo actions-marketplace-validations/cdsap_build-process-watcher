@@ -535,6 +535,26 @@ async function run() {
             console.log('==========================================\n');
         }
 
+        // Print summary statistics if available (for backend mode)
+        const successfulCallsFile = path.join(actionDir, '..', 'successful_calls_count.txt');
+        if (fs.existsSync(successfulCallsFile)) {
+            try {
+                const successfulCalls = fs.readFileSync(successfulCallsFile, 'utf8').trim();
+                const count = parseInt(successfulCalls, 10);
+                if (!isNaN(count)) {
+                    console.log('');
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                    console.log('📊 Build Process Watcher - Summary Statistics');
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                    console.log(`✅ Total successful backend calls: ${count}`);
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                    console.log('');
+                }
+            } catch (error) {
+                // Silently ignore errors reading the file
+            }
+        }
+
         // Check if we have a log file
         // The monitor script creates files in the action directory, not the project directory
         const logFile = path.join(actionDir, '..', 'build_process_watcher.log');
