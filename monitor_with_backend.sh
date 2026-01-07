@@ -35,6 +35,11 @@ REMOTE_MONITORING="${REMOTE_MONITORING:-false}"
 # Check if GC collection is enabled
 COLLECT_GC="${COLLECT_GC:-false}"
 
+# Network timeout configuration (in seconds)
+# Default: 30 seconds total, 10 seconds connection timeout
+CURL_TIMEOUT="${CURL_TIMEOUT:-30}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+
 # Log current working directory (debug only)
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "📂 Current working directory: $(pwd)" >&2
@@ -82,6 +87,18 @@ log_script() {
 
 log_script "Script started successfully"
 
+# Log network environment (proxy, DNS, etc.) for diagnostics
+log_script "Network environment diagnostics:"
+if [ -n "${HTTP_PROXY:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
+  log_script "  Proxy detected: HTTP_PROXY=${HTTP_PROXY:-unset}, HTTPS_PROXY=${HTTPS_PROXY:-unset}"
+  log_script "  Proxy detected: http_proxy=${http_proxy:-unset}, https_proxy=${https_proxy:-unset}"
+else
+  log_script "  No proxy environment variables detected"
+fi
+log_script "  Backend URL: $BACKEND_URL"
+log_script "  Curl timeout: ${CURL_TIMEOUT}s, connect timeout: ${CURL_CONNECT_TIMEOUT}s"
+log_script "  Monitoring interval: ${INTERVAL}s"
+
 # Function to get or refresh authentication token
 get_auth_token() {
     log_script "get_auth_token: Called for run_id: $RUN_ID"
@@ -96,7 +113,11 @@ get_auth_token() {
     local http_code
     
     # Request token from /auth/run/{run_id} endpoint
-    auth_response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "$BACKEND_URL/auth/run/$RUN_ID" \
+    # Add timeout and connection diagnostics
+    log_script "get_auth_token: Starting curl request with timeout ${CURL_TIMEOUT}s, connect timeout ${CURL_CONNECT_TIMEOUT}s"
+    auth_response=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        -w "\nHTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
+        -X POST "$BACKEND_URL/auth/run/$RUN_ID" \
         -H "Content-Type: application/json" 2>&1)
     local curl_exit=$?
     
@@ -270,9 +291,12 @@ EOF
 
     # Send to backend
     log_script "send_process_info_to_backend: Sending POST to $BACKEND_URL/ingest"
+    log_script "send_process_info_to_backend: Timeout ${CURL_TIMEOUT}s, connect timeout ${CURL_CONNECT_TIMEOUT}s"
     local curl_output
     local curl_exit_code
-    curl_output=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "$BACKEND_URL/ingest" \
+    curl_output=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        -w "\nHTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
+        -X POST "$BACKEND_URL/ingest" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $AUTH_TOKEN" \
         -d "$json_payload" 2>&1)
@@ -362,17 +386,39 @@ EOF
     if [ "$DEBUG_MODE" = "true" ]; then
         echo "   Using auth token for authentication" >&2
     fi
-    curl_output=$(curl -s -w "HTTP_CODE:%{http_code}" -X POST "$BACKEND_URL/ingest" \
+    log_script "send_to_backend: Starting curl request (timeout ${CURL_TIMEOUT}s, connect ${CURL_CONNECT_TIMEOUT}s)"
+    log_script "send_to_backend: Elapsed time since start: $(( $(date +%s) - START_TIME )) seconds"
+    curl_output=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        -w "HTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}\nHTTP_CODE:%{http_code}" \
+        -X POST "$BACKEND_URL/ingest" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $AUTH_TOKEN" \
         -d "$json_payload" 2>&1)
     curl_exit_code=$?
     
-    # Extract HTTP code and response
-    local http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
-    local response_body=$(echo "$curl_output" | sed 's/HTTP_CODE:[0-9]*$//')
+    # Extract HTTP code, timing info, and response
+    local http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2)
+    local time_total=$(echo "$curl_output" | grep -o "TIME_TOTAL:[0-9.]*" | cut -d: -f2 || echo "N/A")
+    local time_connect=$(echo "$curl_output" | grep -o "TIME_CONNECT:[0-9.]*" | cut -d: -f2 || echo "N/A")
+    local response_body=$(echo "$curl_output" | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//')
     
-    log_script "send_to_backend: curl exit code: $curl_exit_code, HTTP code: $http_code"
+    log_script "send_to_backend: curl exit code: $curl_exit_code, HTTP code: $http_code, time_total: ${time_total}s, time_connect: ${time_connect}s"
+    
+    # Log specific curl error codes for network diagnostics
+    case $curl_exit_code in
+        6)  log_script "send_to_backend: CURL ERROR 6 - Couldn't resolve host (DNS failure)"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ DNS resolution failed for $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+        7)  log_script "send_to_backend: CURL ERROR 7 - Failed to connect to host"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Connection failed to $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+        28) log_script "send_to_backend: CURL ERROR 28 - Operation timeout"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Request timeout after ${CURL_TIMEOUT}s to $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+        35) log_script "send_to_backend: CURL ERROR 35 - SSL connect error"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ SSL/TLS connection error to $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+        52) log_script "send_to_backend: CURL ERROR 52 - Empty reply from server"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Empty reply from $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+        56) log_script "send_to_backend: CURL ERROR 56 - Failure receiving network data"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Network receive failure from $BACKEND_URL" >> "$BACKEND_DEBUG_LOG" ;;
+    esac
     log_script "send_to_backend: response body: '$response_body'"
     
     if [ $curl_exit_code -eq 0 ] && [ "$http_code" = "200" ]; then
@@ -392,7 +438,10 @@ EOF
             if [ "$DEBUG_MODE" = "true" ]; then
                 echo "   🔄 Retrying with new token..." >&2
             fi
-            curl_output=$(curl -s -w "HTTP_CODE:%{http_code}" -X POST "$BACKEND_URL/ingest" \
+            log_script "send_to_backend: Retrying with new token (timeout ${CURL_TIMEOUT}s)"
+            curl_output=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+                -w "HTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
+                -X POST "$BACKEND_URL/ingest" \
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $AUTH_TOKEN" \
                 -d "$json_payload" 2>&1)
@@ -554,6 +603,21 @@ while true; do
   
   log_script "=== Iteration $ITERATION at $TIMESTAMP (elapsed: ${ELAPSED_TIME}s) ==="
   
+  # Log network connectivity check every 10 iterations (approximately every 50 seconds with 5s interval)
+  if [ $((ITERATION % 10)) -eq 0 ]; then
+    log_script "Network connectivity check (iteration $ITERATION)"
+    if command -v curl >/dev/null 2>&1; then
+      local connectivity_test
+      connectivity_test=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "$BACKEND_URL/healthz" 2>&1 || echo "FAILED")
+      log_script "Backend health check result: $connectivity_test"
+      if [ "$connectivity_test" != "200" ] && [ "$connectivity_test" != "FAILED" ]; then
+        log_script "WARNING: Backend health check returned non-200: $connectivity_test"
+      elif [ "$connectivity_test" = "FAILED" ]; then
+        log_script "ERROR: Backend health check failed - network may be down"
+      fi
+    fi
+  fi
+  
   jps_output=$(jps)
   jps_exit_code=$?
   
@@ -690,6 +754,11 @@ while true; do
   log_script "Finished processing all jps lines. Total processes found: $PROCESS_COUNT"
   log_script "process_data array now has ${#process_data[@]} entries"
 
+  # Track send results for this iteration
+  local sends_attempted=0
+  local sends_succeeded=0
+  local sends_failed=0
+
   # Send all collected process data with the same timestamp
   if [ ${#process_data[@]} -gt 0 ]; then
     log_script "Preparing to send ${#process_data[@]} process data entries to backend"
@@ -697,22 +766,45 @@ while true; do
         echo "📤 [${TIMESTAMP}] Sending ${#process_data[@]} processes to backend..." >&2
     fi
     for data_line in "${process_data[@]}"; do
+      sends_attempted=$((sends_attempted + 1))
       log_script "Sending data line: '$data_line'"
       if [ "$COLLECT_GC" = "true" ]; then
         IFS='|' read -r ts pid name heap_used heap_cap rss gc_time <<< "$data_line"
         log_script "Calling send_to_backend with GC data for PID $pid"
-        send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB" "$gc_time"
-        log_script "send_to_backend completed for PID $pid"
+        if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB" "$gc_time"; then
+          sends_succeeded=$((sends_succeeded + 1))
+          log_script "send_to_backend succeeded for PID $pid"
+        else
+          sends_failed=$((sends_failed + 1))
+          log_script "send_to_backend failed for PID $pid"
+        fi
       else
         IFS='|' read -r ts pid name heap_used heap_cap rss <<< "$data_line"
         log_script "Calling send_to_backend without GC data for PID $pid"
-        send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB"
-        log_script "send_to_backend completed for PID $pid"
+        if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB"; then
+          sends_succeeded=$((sends_succeeded + 1))
+          log_script "send_to_backend succeeded for PID $pid"
+        else
+          sends_failed=$((sends_failed + 1))
+          log_script "send_to_backend failed for PID $pid"
+        fi
       fi
     done
-    log_script "Finished sending all ${#process_data[@]} data entries"
+    log_script "Finished sending: $sends_attempted attempted, $sends_succeeded succeeded, $sends_failed failed"
   else
     log_script "No process data to send (process_data array is empty)"
+  fi
+
+  # Log iteration summary every 10 iterations or if there were failures
+  if [ $((ITERATION % 10)) -eq 0 ] || [ $sends_failed -gt 0 ]; then
+    log_script "=== Iteration $ITERATION Summary ==="
+    log_script "  Elapsed time: ${ELAPSED_TIME}s (${TIMESTAMP})"
+    log_script "  Processes found: $PROCESS_COUNT"
+    log_script "  Data entries: ${#process_data[@]}"
+    log_script "  Sends: $sends_attempted attempted, $sends_succeeded succeeded, $sends_failed failed"
+    log_script "  Script PID: $$"
+    log_script "  Backend URL: $BACKEND_URL"
+    log_script "================================"
   fi
 
   log_script "Sleeping for $INTERVAL seconds before next iteration"
