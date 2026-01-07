@@ -124,7 +124,8 @@ get_auth_token() {
     log_script "get_auth_token: curl exit code: $curl_exit"
     
     http_code=$(echo "$auth_response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
-    local response_body=$(echo "$auth_response" | sed 's/HTTP_CODE:[0-9]*$//')
+    # Extract response body, removing curl timing info and HTTP_CODE line
+    local response_body=$(echo "$auth_response" | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//' | sed '/^HTTP_CODE:/d' | sed '/^TIME_TOTAL:/d' | sed '/^TIME_CONNECT:/d')
     
     log_script "get_auth_token: HTTP code: $http_code, response length: ${#response_body}"
     
@@ -389,7 +390,7 @@ EOF
     log_script "send_to_backend: Starting curl request (timeout ${CURL_TIMEOUT}s, connect ${CURL_CONNECT_TIMEOUT}s)"
     log_script "send_to_backend: Elapsed time since start: $(( $(date +%s) - START_TIME )) seconds"
     curl_output=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        -w "HTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}\nHTTP_CODE:%{http_code}" \
+        -w "\nHTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
         -X POST "$BACKEND_URL/ingest" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $AUTH_TOKEN" \
@@ -400,7 +401,8 @@ EOF
     local http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2)
     local time_total=$(echo "$curl_output" | grep -o "TIME_TOTAL:[0-9.]*" | cut -d: -f2 || echo "N/A")
     local time_connect=$(echo "$curl_output" | grep -o "TIME_CONNECT:[0-9.]*" | cut -d: -f2 || echo "N/A")
-    local response_body=$(echo "$curl_output" | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//')
+    # Extract response body, removing all curl timing info and HTTP_CODE lines
+    local response_body=$(echo "$curl_output" | sed '/^HTTP_CODE:/d' | sed '/^TIME_TOTAL:/d' | sed '/^TIME_CONNECT:/d' | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//')
     
     log_script "send_to_backend: curl exit code: $curl_exit_code, HTTP code: $http_code, time_total: ${time_total}s, time_connect: ${time_connect}s"
     
@@ -440,14 +442,15 @@ EOF
             fi
             log_script "send_to_backend: Retrying with new token (timeout ${CURL_TIMEOUT}s)"
             curl_output=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-                -w "HTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
+                -w "\nHTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
                 -X POST "$BACKEND_URL/ingest" \
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $AUTH_TOKEN" \
                 -d "$json_payload" 2>&1)
             curl_exit_code=$?
-            http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
-            response_body=$(echo "$curl_output" | sed 's/HTTP_CODE:[0-9]*$//')
+            http_code=$(echo "$curl_output" | grep -o "HTTP_CODE:[0-9]*" | head -1 | cut -d: -f2)
+            # Extract response body, removing all curl timing info and HTTP_CODE lines
+            response_body=$(echo "$curl_output" | sed '/^HTTP_CODE:/d' | sed '/^TIME_TOTAL:/d' | sed '/^TIME_CONNECT:/d' | sed 's/HTTP_CODE:[0-9]*$//' | sed 's/TIME_TOTAL:[0-9.]*$//' | sed 's/TIME_CONNECT:[0-9.]*$//')
             
             if [ $curl_exit_code -eq 0 ] && [ "$http_code" = "200" ]; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ SUCCESS (retry): Sent data for $pid ($name) at $timestamp (HTTP $http_code)" >> "$BACKEND_DEBUG_LOG"
@@ -755,9 +758,9 @@ while true; do
   log_script "process_data array now has ${#process_data[@]} entries"
 
   # Track send results for this iteration
-  local sends_attempted=0
-  local sends_succeeded=0
-  local sends_failed=0
+  sends_attempted=0
+  sends_succeeded=0
+  sends_failed=0
 
   # Send all collected process data with the same timestamp
   if [ ${#process_data[@]} -gt 0 ]; then
