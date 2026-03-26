@@ -6,6 +6,7 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import * as core from '@actions/core';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+import { parseTimestampSeconds, generateJsonReport } from './lib/report';
 
 const execAsync = promisify(exec);
 
@@ -62,7 +63,38 @@ function parseLogFile(logFile: string): { processes: Map<string, ProcessData>, t
         }
         });
 
-    return { processes, timestamps: Array.from(timestamps).sort(), hasGcData };
+    const orderedTimestamps = Array.from(timestamps)
+        .sort((a, b) => parseTimestampSeconds(a) - parseTimestampSeconds(b));
+    return { processes, timestamps: orderedTimestamps, hasGcData };
+}
+
+function generateCsvReport(logFile: string, outputFile: string, hasGcData: boolean): void {
+    const lines = fs.readFileSync(logFile, 'utf8').split('\n');
+    const dataLines = lines.slice(2).filter(line => line.trim().length > 0);
+    const header = hasGcData
+        ? ['elapsed_time', 'pid', 'name', 'heap_used_mb', 'heap_capacity_mb', 'rss_mb', 'gc_time_s']
+        : ['elapsed_time', 'pid', 'name', 'heap_used_mb', 'heap_capacity_mb', 'rss_mb'];
+    const rows = [header.join(',')];
+
+    dataLines.forEach(line => {
+        const parts = line.trim().split('|').map(p => p.trim());
+        if (parts.length !== 6 && parts.length !== 7) return;
+        const [timestamp, pid, name, heapUsed, heapCap, rss, gcTime] = parts;
+        const baseRow = [
+            timestamp,
+            pid,
+            name,
+            heapUsed.replace('MB', ''),
+            heapCap.replace('MB', ''),
+            rss.replace('MB', '')
+        ];
+        if (parts.length === 7 && hasGcData) {
+            baseRow.push(gcTime.replace('s', '').replace('N/A', '0'));
+        }
+        rows.push(baseRow.join(','));
+    });
+
+    fs.writeFileSync(outputFile, rows.join('\n'));
 }
 
 function generateMermaidChart(processes: Map<string, ProcessData>, timestamps: string[]): string {
@@ -125,6 +157,95 @@ flowchart LR
     ${sampledTimestamps.map((_, i) => `class Agg_${i} aggregated`).join('\n    ')}`;
 }
 
+function median(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+        return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+}
+
+function buildForwardFilledSeries(
+    timestamps: string[],
+    timestampSeconds: number[],
+    valuesByTimestamp: Map<string, number>,
+    maxGapSeconds: number
+): Array<number | null> {
+    const series: Array<number | null> = [];
+    let lastValue: number | null = null;
+    let lastSeenTime: number | null = null;
+
+    for (let i = 0; i < timestamps.length; i += 1) {
+        const timestamp = timestamps[i];
+        const timeSeconds = timestampSeconds[i];
+        const value = valuesByTimestamp.get(timestamp);
+
+        if (value !== undefined && Number.isFinite(value)) {
+            lastValue = value;
+            lastSeenTime = timeSeconds;
+            series.push(value);
+            continue;
+        }
+
+        if (lastValue === null || lastSeenTime === null) {
+            series.push(null);
+            continue;
+        }
+
+        if (timeSeconds - lastSeenTime > maxGapSeconds) {
+            lastValue = null;
+            lastSeenTime = null;
+            series.push(null);
+            continue;
+        }
+
+        series.push(lastValue);
+    }
+
+    return series;
+}
+
+function buildPathFromSeries(
+    series: Array<number | null>,
+    xScale: number,
+    yScale: number,
+    height: number,
+    margin: { bottom: number; left: number }
+): string {
+    let path = '';
+    let started = false;
+
+    for (let i = 0; i < series.length; i += 1) {
+        const value = series[i];
+        if (value === null || !Number.isFinite(value)) {
+            started = false;
+            continue;
+        }
+        const x = margin.left + (i * xScale);
+        const y = height - margin.bottom - (value * yScale);
+        if (!started) {
+            path += `M ${x} ${y}`;
+            started = true;
+        } else {
+            path += ` L ${x} ${y}`;
+        }
+    }
+
+    return path;
+}
+
+function lightenHexColor(hex: string, amount: number): string {
+    const normalized = hex.replace('#', '');
+    if (normalized.length !== 6) return hex;
+    const num = parseInt(normalized, 16);
+    const r = Math.min(255, ((num >> 16) & 0xff) + amount);
+    const g = Math.min(255, ((num >> 8) & 0xff) + amount);
+    const b = Math.min(255, (num & 0xff) + amount);
+    return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
 function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]): string {
     const width = 1400;
     const height = 800;
@@ -135,20 +256,75 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
         left: 100
     };
 
-    // Calculate aggregated RSS first to determine true max value
-    const aggregatedRss = timestamps.map(timestamp => {
-        return Array.from(processes.values())
-            .filter(p => p.timestamps.includes(timestamp))
-            .reduce((sum, p) => sum + p.rss[p.timestamps.indexOf(timestamp)], 0);
+    const timestampSeconds = timestamps.map(parseTimestampSeconds);
+    const deltas = timestampSeconds.slice(1).map((value, index) => value - timestampSeconds[index]).filter(delta => delta > 0);
+    const medianDelta = median(deltas) || 1;
+    const maxGapSeconds = medianDelta * 2;
+
+    const perProcessRss: Array<Array<number | null>> = [];
+    const perProcessHeap: Array<Array<number | null>> = [];
+
+    Array.from(processes.values()).forEach(process => {
+        const rssMap = new Map<string, number>();
+        const heapMap = new Map<string, number>();
+        process.timestamps.forEach((timestamp, index) => {
+            const rssValue = process.rss[index];
+            const heapValue = process.heapUsed[index];
+            if (Number.isFinite(rssValue)) {
+                rssMap.set(timestamp, rssValue);
+            }
+            if (Number.isFinite(heapValue)) {
+                heapMap.set(timestamp, heapValue);
+            }
+        });
+        perProcessRss.push(buildForwardFilledSeries(timestamps, timestampSeconds, rssMap, maxGapSeconds));
+        perProcessHeap.push(buildForwardFilledSeries(timestamps, timestampSeconds, heapMap, maxGapSeconds));
+    });
+
+    const activeCounts: number[] = [];
+    const aggregatedRss = timestamps.map((_, index) => {
+        let hasValue = false;
+        let activeCount = 0;
+        const sum = perProcessRss.reduce((total, series) => {
+            const value = series[index];
+            if (value === null || !Number.isFinite(value)) {
+                return total;
+            }
+            hasValue = true;
+            activeCount += 1;
+            return total + value;
+        }, 0);
+        activeCounts.push(activeCount);
+        return hasValue ? sum : null;
     });
 
     // Calculate scales using max of individual processes and aggregated
-    const maxIndividualRss = Math.max(...Array.from(processes.values()).flatMap(p => p.rss));
-    const maxAggregatedRss = Math.max(...aggregatedRss);
+    const rssValues = perProcessRss.flatMap(series => series.filter((value): value is number => value !== null));
+    const maxIndividualRss = rssValues.length > 0 ? Math.max(...rssValues) : 0;
+    const aggregatedValues = aggregatedRss.filter((value): value is number => value !== null);
+    const maxAggregatedRss = aggregatedValues.length > 0 ? Math.max(...aggregatedValues) : 0;
     const maxRss = Math.max(maxIndividualRss, maxAggregatedRss);
+
+    if (aggregatedValues.length > 0) {
+        const maxActiveCount = Math.max(...activeCounts);
+        if (maxActiveCount >= 2) {
+            const tailThreshold = maxAggregatedRss * 0.2;
+            for (let i = aggregatedRss.length - 1; i >= 0; i -= 1) {
+                const value = aggregatedRss[i];
+                if (value === null) {
+                    continue;
+                }
+                if (activeCounts[i] <= 1 && value <= tailThreshold) {
+                    aggregatedRss[i] = null;
+                    continue;
+                }
+                break;
+            }
+        }
+    }
     
-    // Round up maxRss to nearest 1000 for better y-axis scale
-    const yAxisMax = Math.ceil(maxRss / 1000) * 1000;
+    // Scale based on observed max to improve visibility
+    const yAxisMax = Math.max(50, Math.ceil(maxRss * 1.1));
     const xScale = (width - margin.left - margin.right) / (timestamps.length - 1) || 1;
     const yScale = (height - margin.top - margin.bottom) / yAxisMax;
 
@@ -172,8 +348,15 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
     // Add title
     svg += `<text x="${width/2}" y="40" text-anchor="middle" font-size="24" font-weight="bold">Build Process Memory Usage Over Time</text>\n`;
 
-    // Add grid lines (every 500MB)
-    const gridInterval = 500; // MB
+    // Add grid lines (dynamic interval)
+    let gridInterval = 1000;
+    if (yAxisMax <= 200) {
+        gridInterval = 20;
+    } else if (yAxisMax <= 1000) {
+        gridInterval = 100;
+    } else if (yAxisMax <= 5000) {
+        gridInterval = 500;
+    }
     for (let i = 0; i <= yAxisMax; i += gridInterval) {
         const y = height - margin.bottom - (i * yScale);
         svg += `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="5,5"/>\n`;
@@ -198,40 +381,36 @@ function generateSvg(processes: Map<string, ProcessData>, timestamps: string[]):
 
     // Draw process lines and legend
     let legendY = margin.top + 30;
-    Array.from(processes.entries()).forEach(([key, data], idx) => {
+    Array.from(processes.entries()).forEach(([key], idx) => {
         const color = processColors[idx % processColors.length];
+        const heapColor = lightenHexColor(color, 80);
+        const rssSeries = perProcessRss[idx];
+        const heapSeries = perProcessHeap[idx];
         // RSS line (solid)
-        const rssPoints = data.timestamps.map((timestamp, i) => {
-            const x = margin.left + (timestamps.indexOf(timestamp) * xScale);
-            const y = height - margin.bottom - (data.rss[i] * yScale);
-            return `${x},${y}`;
-        }).join(' ');
-        svg += `<polyline points="${rssPoints}" stroke="${color}" stroke-width="2.5" fill="none" opacity="0.95"/>\n`;
+        const rssPath = buildPathFromSeries(rssSeries, xScale, yScale, height, { left: margin.left, bottom: margin.bottom });
+        if (rssPath) {
+            svg += `<path d="${rssPath}" stroke="${color}" stroke-width="2.5" fill="none" opacity="0.95"/>\n`;
+        }
 
         // Heap Used line (dashed)
-        const heapPoints = data.timestamps.map((timestamp, i) => {
-            const x = margin.left + (timestamps.indexOf(timestamp) * xScale);
-            const y = height - margin.bottom - (data.heapUsed[i] * yScale);
-            return `${x},${y}`;
-        }).join(' ');
-        svg += `<polyline points="${heapPoints}" stroke="${color}" stroke-width="2.5" fill="none" opacity="0.95" stroke-dasharray="8,5"/>\n`;
+        const heapPath = buildPathFromSeries(heapSeries, xScale, yScale, height, { left: margin.left, bottom: margin.bottom });
+        if (heapPath) {
+            svg += `<path d="${heapPath}" stroke="${heapColor}" stroke-width="3" fill="none" opacity="0.9" stroke-dasharray="12,6"/>\n`;
+        }
 
         // Legend for this process
         svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="6" fill="${color}" opacity="0.95"/>\n`;
         svg += `<text x="${width - margin.right + 70}" y="${legendY - 2}" font-size="14" fill="#333">${key} (RSS)</text>\n`;
-        svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 13}" x2="${width - margin.right + 60}" y2="${legendY + 13}" stroke="${color}" stroke-width="2.5" stroke-dasharray="8,5"/>\n`;
+        svg += `<line x1="${width - margin.right + 40}" y1="${legendY + 13}" x2="${width - margin.right + 60}" y2="${legendY + 13}" stroke="${heapColor}" stroke-width="3" stroke-dasharray="12,6"/>\n`;
         svg += `<text x="${width - margin.right + 70}" y="${legendY + 18}" font-size="14" fill="#333">${key} (Heap Used)</text>\n`;
         legendY += 40;
     });
 
     // Draw aggregated RSS line (black, solid)
-    const aggregatedPoints = timestamps.map((timestamp, i) => {
-        const x = margin.left + (i * xScale);
-        const y = height - margin.bottom - (aggregatedRss[i] * yScale);
-        return `${x},${y}`;
-    }).join(' ');
-    svg += `<polyline points="${aggregatedPoints}" stroke="${aggRssColor}" stroke-width="3.5" fill="none" opacity="0.9"/>\n`;
-
+    const aggregatedPath = buildPathFromSeries(aggregatedRss, xScale, yScale, height, { left: margin.left, bottom: margin.bottom });
+    if (aggregatedPath) {
+        svg += `<path d="${aggregatedPath}" stroke="${aggRssColor}" stroke-width="3.5" fill="none" opacity="0.9"/>\n`;
+    }
     // Aggregated legend
     svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" fill="${aggRssColor}" opacity="0.9"/>\n`;
     svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" font-size="14" fill="#333">Aggregated RSS</text>\n`;
@@ -264,15 +443,14 @@ function generateGcSvg(processes: Map<string, ProcessData>, timestamps: string[]
             }, 0);
     });
 
-    // Calculate max GC time for scaling
-    const maxIndividualGc = Math.max(...Array.from(processes.values())
-        .filter(p => p.gcTime)
-        .flatMap(p => p.gcTime || []));
+    const gcValues = Array.from(processes.values())
+        .filter(p => p.gcTime && p.gcTime.length > 0)
+        .flatMap(p => p.gcTime || []);
+    const maxIndividualGc = gcValues.length > 0 ? Math.max(...gcValues) : 0;
     const maxAggregatedGc = Math.max(...aggregatedGcTime);
     const maxGc = Math.max(maxIndividualGc, maxAggregatedGc);
     
-    // Round up maxGc to nearest 0.5 for better y-axis scale
-    const yAxisMax = Math.ceil(maxGc * 2) / 2 || 1;
+    const yAxisMax = Math.max(0.1, maxGc * 1.1);
     const xScale = (width - margin.left - margin.right) / (timestamps.length - 1) || 1;
     const yScale = (height - margin.top - margin.bottom) / yAxisMax;
 
@@ -295,8 +473,15 @@ function generateGcSvg(processes: Map<string, ProcessData>, timestamps: string[]
     // Add title
     svg += `<text x="${width/2}" y="40" text-anchor="middle" font-size="24" font-weight="bold">Build Process GC Time Over Time</text>\n`;
 
-    // Add grid lines (every 0.1s)
-    const gridInterval = 0.1; // seconds
+    // Add grid lines (dynamic interval)
+    let gridInterval = 0.1;
+    if (yAxisMax > 1 && yAxisMax <= 5) {
+        gridInterval = 0.5;
+    } else if (yAxisMax > 5 && yAxisMax <= 20) {
+        gridInterval = 1;
+    } else if (yAxisMax > 20) {
+        gridInterval = 5;
+    }
     for (let i = 0; i <= yAxisMax; i += gridInterval) {
         const y = height - margin.bottom - (i * yScale);
         svg += `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="#e0e0e0" stroke-width="1" stroke-dasharray="5,5"/>\n`;
@@ -321,6 +506,12 @@ function generateGcSvg(processes: Map<string, ProcessData>, timestamps: string[]
         svg += `<text x="${x}" y="${height - margin.bottom + 20}" transform="rotate(45 ${x},${height - margin.bottom + 20})" text-anchor="start" font-size="12" fill="#333">${timestamps[i]}</text>\n`;
     }
 
+    if (maxGc <= 0) {
+        svg += `<text x="${width/2}" y="${height/2}" text-anchor="middle" font-size="18" fill="#64748b">No GC data available</text>\n`;
+        svg += '</svg>';
+        return svg;
+    }
+
     // Draw process GC time lines and legend
     let legendY = margin.top + 30;
     Array.from(processes.entries()).forEach(([key, data], idx) => {
@@ -341,18 +532,6 @@ function generateGcSvg(processes: Map<string, ProcessData>, timestamps: string[]
         legendY += 30;
     });
 
-    // Draw aggregated GC time line (red, solid)
-    const aggregatedPoints = timestamps.map((timestamp, i) => {
-        const x = margin.left + (i * xScale);
-        const y = height - margin.bottom - (aggregatedGcTime[i] * yScale);
-        return `${x},${y}`;
-    }).join(' ');
-    svg += `<polyline points="${aggregatedPoints}" stroke="${aggGcColor}" stroke-width="3.5" fill="none" opacity="0.9"/>\n`;
-
-    // Aggregated legend
-    svg += `<rect x="${width - margin.right + 40}" y="${legendY - 10}" width="20" height="20" fill="${aggGcColor}" opacity="0.9"/>\n`;
-    svg += `<text x="${width - margin.right + 70}" y="${legendY + 5}" font-size="14" fill="#333">Aggregated GC Time</text>\n`;
-
     // Add axis labels
     svg += `<text x="${width/2}" y="${height - 10}" text-anchor="middle" font-size="16" fill="#333">Time</text>\n`;
     svg += `<text x="${margin.left - 60}" y="${height/2}" text-anchor="middle" transform="rotate(-90 ${margin.left - 60},${height/2})" font-size="16" fill="#333">GC Time (seconds)</text>\n`;
@@ -363,8 +542,23 @@ function generateGcSvg(processes: Map<string, ProcessData>, timestamps: string[]
 
 async function markProcessAsFinished(runId: string): Promise<void> {
     try {
-        const backendUrl = process.env.BACKEND_URL;
+        let backendUrl = '';
+        const workspaceDir = process.env.GITHUB_WORKSPACE;
+        const candidateDirs = [process.cwd(), workspaceDir].filter(Boolean) as string[];
+        for (const dir of candidateDirs) {
+            const backendFile = path.join(dir, '.build-process-watcher-backend-url');
+            if (fs.existsSync(backendFile)) {
+                backendUrl = fs.readFileSync(backendFile, 'utf8').trim();
+                break;
+            }
+        }
+        const backendEnabled = process.env.ENABLE_BACKEND === 'true';
         
+        if (!backendEnabled) {
+            console.log(`ℹ️  Remote monitoring disabled; skipping finish for run ${runId}`);
+            return;
+        }
+
         if (backendUrl) {
             // Use backend API to mark as finished
             console.log(`🏁 Marking run ${runId} as finished via backend API...`);
@@ -529,10 +723,19 @@ async function run() {
         // Try to read from file if not in env var
         if (!runId) {
             try {
-                const runIdFile = path.join(process.cwd(), '.build-process-watcher-run-id');
-                if (fs.existsSync(runIdFile)) {
-                    runId = fs.readFileSync(runIdFile, 'utf8').trim();
-                    console.log(`📋 Read RUN_ID from file: ${runId}`);
+                const cwdRunIdFile = path.join(process.cwd(), '.build-process-watcher-run-id');
+                const workspaceDir = process.env.GITHUB_WORKSPACE;
+                const workspaceRunIdFile = workspaceDir
+                    ? path.join(workspaceDir, '.build-process-watcher-run-id')
+                    : '';
+                const candidateFiles = [cwdRunIdFile, workspaceRunIdFile].filter(Boolean);
+
+                for (const runIdFile of candidateFiles) {
+                    if (fs.existsSync(runIdFile)) {
+                        runId = fs.readFileSync(runIdFile, 'utf8').trim();
+                        console.log(`📋 Read RUN_ID from file: ${runId}`);
+                        break;
+                    }
                 }
             } catch (error) {
                 // Ignore errors when reading file
@@ -570,8 +773,8 @@ async function run() {
             }
         }
         
-        // Always try to mark as finished if we have a run ID
-        if (runId) {
+        // Only mark as finished for remote monitoring runs
+        if (runId && process.env.ENABLE_BACKEND === 'true') {
             console.log(`🏁 Marking run ${runId} as finished...`);
             try {
                 await markProcessAsFinished(runId);
@@ -579,6 +782,8 @@ async function run() {
                 console.error(`❌ Failed to mark run ${runId} as finished:`, error);
                 // Don't throw - we want cleanup to continue even if marking fails
             }
+        } else if (runId) {
+            console.log(`ℹ️  Remote monitoring disabled; skipping finish for run ${runId}`);
         } else {
             console.log('⚠️  No run ID found, skipping Firestore update');
             console.log('   Available env vars:', Object.keys(process.env).filter(k => k.includes('RUN') || k.includes('GITHUB')).join(', ') || 'none');
@@ -657,8 +862,17 @@ async function run() {
 
         // Check if we have a log file
         // The monitor script creates files in the action directory, not the project directory
-        const logFile = path.join(actionDir, '..', 'build_process_watcher.log');
-        const backendMode = process.env.ENABLE_BACKEND === 'true' || process.env.BACKEND_URL;
+        const logFileName = process.env.LOG_FILE || 'build_process_watcher.log';
+        let logFile = logFileName;
+        if (!path.isAbsolute(logFileName)) {
+            const workspaceDir = process.env.GITHUB_WORKSPACE;
+            const candidates = [
+                path.join(actionDir, '..', logFileName),
+                workspaceDir ? path.join(workspaceDir, logFileName) : ''
+            ].filter(Boolean);
+            logFile = candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+        }
+        const backendMode = process.env.ENABLE_BACKEND === 'true';
         
         if (debugMode) {
             console.log(`🔍 Debug: Current working directory: ${process.cwd()}`);
@@ -680,21 +894,23 @@ async function run() {
                 // Always show the dashboard URL for remote monitoring
                 // Check if frontend URL is explicitly set, otherwise derive from backend URL or environment
                 let frontendUrl = '';
-                const explicitFrontendUrl = process.env.FRONTEND_URL || '';
+                let explicitFrontendUrl = '';
+                const workspaceDir = process.env.GITHUB_WORKSPACE;
+                const candidateDirs = [process.cwd(), workspaceDir].filter(Boolean) as string[];
+                for (const dir of candidateDirs) {
+                    const frontendFile = path.join(dir, '.build-process-watcher-frontend-url');
+                    if (fs.existsSync(frontendFile)) {
+                        explicitFrontendUrl = fs.readFileSync(frontendFile, 'utf8').trim();
+                        break;
+                    }
+                }
                 
                 if (explicitFrontendUrl) {
                     // Use explicit frontend URL
                     frontendUrl = `${explicitFrontendUrl}/runs/${runId}`;
                 } else {
                     // Derive frontend URL from backend URL pattern or environment
-                    const backendUrl = process.env.BACKEND_URL || '';
-                    const environment = process.env.ENVIRONMENT || 'production';
                     let baseFrontendUrl = 'https://process-watcher.web.app';
-                    
-                    // Check environment first, then backend URL pattern as fallback
-                    if (environment === 'staging' || backendUrl.includes('-staging')) {
-                        baseFrontendUrl = 'https://build-process-watcher-staging.web.app';
-                    }
                     
                     frontendUrl = `${baseFrontendUrl}/runs/${runId}`;
                 }
@@ -705,7 +921,6 @@ async function run() {
                     console.log('Backend mode detected - no local log file to process');
                     console.log('Data has been sent to the backend and can be viewed at:');
                     console.log(`- Frontend: ${frontendUrl}`);
-                    console.log(`- Backend API: ${process.env.BACKEND_URL || 'not configured'}`);
                 }
             } else {
                 if (debugMode) {
@@ -725,17 +940,25 @@ async function run() {
         const mermaidChart = generateMermaidChart(processes, timestamps);
         const svgContent = generateSvg(processes, timestamps);
 
-        // Save SVG file
-        fs.writeFileSync('memory_usage.svg', svgContent);
+        const outputDir = path.dirname(logFile);
+        const outputSuffix = runId ? `-${runId}` : '';
+        const memorySvgFile = `memory_usage${outputSuffix}.svg`;
+        const gcSvgFile = `gc_time${outputSuffix}.svg`;
+        const csvFile = `build_process_watcher${outputSuffix}.csv`;
+        const jsonFile = `build_process_watcher${outputSuffix}.json`;
 
-        // Generate GC SVG if GC data is available
-        if (hasGcData) {
-            if (debugMode) {
-                console.log('Generating GC time graph...');
-            }
-            const gcSvgContent = generateGcSvg(processes, timestamps);
-            fs.writeFileSync('gc_time.svg', gcSvgContent);
+        // Save SVG file
+        fs.writeFileSync(path.join(outputDir, memorySvgFile), svgContent);
+
+        // Generate GC SVG (includes a fallback message if no GC data)
+        if (debugMode) {
+            console.log('Generating GC time graph...');
         }
+        const gcSvgContent = generateGcSvg(processes, timestamps);
+        fs.writeFileSync(path.join(outputDir, gcSvgFile), gcSvgContent);
+
+        generateCsvReport(logFile, path.join(outputDir, csvFile), hasGcData);
+        generateJsonReport(logFile, path.join(outputDir, jsonFile), hasGcData);
 
         // Upload artifacts (only if files exist)
         // Only upload artifacts if we're in a GitHub Actions context and have runtime token
@@ -752,42 +975,56 @@ async function run() {
         if (shouldUpload) {
             try {
                 const artifactClient = new DefaultArtifactClient();
-                // Create stable artifact name using job ID and run attempt
-                // Use run_id if available, otherwise use a simple name to avoid duplicates
-                const jobId = process.env.GITHUB_JOB || 'default';
+                // Create stable artifact name using job name and run attempt
+                const jobName = process.env.GITHUB_JOB || 'default';
                 const runAttempt = process.env.GITHUB_RUN_ATTEMPT || '1';
-                const runId = process.env.RUN_ID || '';
                 
-                // Use run_id in artifact name if available, otherwise use job+attempt
-                // This prevents duplicate artifacts when cleanup runs multiple times
-                const artifactName = runId 
-                    ? `build_process_watcher-${runId}`
-                    : `build_process_watcher-${jobId}-${runAttempt}`;
+                // Use job name in artifact name (run attempt avoids duplicates on re-runs)
+                const artifactName = `build_process_watcher-${jobName}-${runAttempt}`;
                 
-                const files = [];
+                const files: string[] = [];
                 
                 // Only include files that exist
-                if (fs.existsSync('build_process_watcher.log')) {
-                    files.push('build_process_watcher.log');
+                const logFileBase = path.basename(logFile);
+                if (fs.existsSync(logFile)) {
+                    files.push(logFileBase);
                 }
-                if (fs.existsSync('memory_usage.svg')) {
-                    files.push('memory_usage.svg');
+                if (fs.existsSync(path.join(outputDir, memorySvgFile))) {
+                    files.push(memorySvgFile);
                 }
-                if (fs.existsSync('gc_time.svg')) {
-                    files.push('gc_time.svg');
+                if (fs.existsSync(path.join(outputDir, gcSvgFile))) {
+                    files.push(gcSvgFile);
                 }
-                if (fs.existsSync('backend_debug.log')) {
-                    files.push('backend_debug.log');
+                if (fs.existsSync(path.join(outputDir, csvFile))) {
+                    files.push(csvFile);
                 }
-                if (fs.existsSync('script_debug.log')) {
-                    files.push('script_debug.log');
+                if (fs.existsSync(path.join(outputDir, jsonFile))) {
+                    files.push(jsonFile);
+                }
+                if (debugMode) {
+                    const backendDebugLog = path.join(actionDir, '..', 'backend_debug.log');
+                    if (fs.existsSync(backendDebugLog)) {
+                        const debugCopy = path.join(outputDir, `backend_debug${outputSuffix}.log`);
+                        if (!fs.existsSync(debugCopy)) {
+                            fs.copyFileSync(backendDebugLog, debugCopy);
+                        }
+                        files.push(path.basename(debugCopy));
+                    }
+                    const scriptDebugLog = path.join(actionDir, '..', 'script_debug.log');
+                    if (fs.existsSync(scriptDebugLog)) {
+                        const debugCopy = path.join(outputDir, `script_debug${outputSuffix}.log`);
+                        if (!fs.existsSync(debugCopy)) {
+                            fs.copyFileSync(scriptDebugLog, debugCopy);
+                        }
+                        files.push(path.basename(debugCopy));
+                    }
                 }
                 
                 if (files.length > 0) {
                     if (debugMode) {
                         console.log('Uploading artifacts...');
                     }
-                    await artifactClient.uploadArtifact(artifactName, files, '.');
+                    await artifactClient.uploadArtifact(artifactName, files, outputDir);
                     if (debugMode) {
                         console.log('Successfully uploaded artifacts');
                     }
@@ -812,9 +1049,9 @@ async function run() {
             }
         }
 
-        // Add to GitHub Actions summary (only if not disabled for remote mode)
+        // Add to GitHub Actions summary unless explicitly disabled
         const disableSummaryOutput = process.env.DISABLE_SUMMARY_OUTPUT === 'true';
-        const shouldGenerateSummary = !(backendMode && disableSummaryOutput);
+        const shouldGenerateSummary = !disableSummaryOutput;
         
         if (process.env.GITHUB_STEP_SUMMARY && shouldGenerateSummary) {
             const summary = fs.readFileSync(process.env.GITHUB_STEP_SUMMARY, 'utf8');
@@ -822,13 +1059,14 @@ async function run() {
             if (backendMode && runId) {
                 // Remote monitoring mode - show dashboard info + Mermaid diagram if data available
                 const frontendUrl = `https://process-watcher.web.app/runs/${runId}`;
+                const summarySubtitle = process.env.GITHUB_JOB || runId || '';
                 
                 let newSummary = `${summary}
 
-## Build Process Monitoring
+## Build Process Watcher${summarySubtitle ? ` (${summarySubtitle})` : ''}
 
 ### Remote Monitoring Mode
-- **Dashboard URL**: ${frontendUrl} (**Data Retention**: 3 hours)
+- **Dashboard URL**: ${frontendUrl} (**Data Retention**: 24 hours)
 `;
 
                 // Add Mermaid diagram if we have local data
@@ -863,7 +1101,7 @@ ${Array.from(processes.entries()).map(([key, data]) => {
 - Last measurement: ${lastRss.toFixed(2)} MB`;
 }).join('\n\n')}
 
-> Note: A detailed SVG graph and log file are available in the artifacts of this workflow run.`;
+                > Note: A detailed SVG graph and log file are available in the artifacts of this workflow run.`;
                 }
 
                 fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, newSummary);
@@ -874,10 +1112,11 @@ ${Array.from(processes.entries()).map(([key, data]) => {
                 const duration = timestamps.length > 0 ?
                     `from ${timestamps[0]} to ${timestamps[timestamps.length - 1]}` :
                     'N/A';
+                const summarySubtitle = process.env.GITHUB_JOB || runId || '';
 
                 const newSummary = `${summary}
 
-## Build Process Analysis
+## Build Process Watcher${summarySubtitle ? ` (${summarySubtitle})` : ''}
 
 ### Build Process Graph
 \`\`\`mermaid
@@ -894,14 +1133,22 @@ ${Array.from(processes.entries()).map(([key, data]) => {
     const maxProcessRss = Math.max(...data.rss);
     const avgProcessRss = data.rss.reduce((a, b) => a + b, 0) / data.rss.length;
     const lastRss = data.rss[data.rss.length - 1];
+    const gcStats = hasGcData && data.gcTime && data.gcTime.length > 0
+        ? (() => {
+            const maxGc = Math.max(...data.gcTime);
+            const lastGc = data.gcTime[data.gcTime.length - 1];
+            return `\n- Max GC time: ${maxGc.toFixed(3)} s\n- Last GC time: ${lastGc.toFixed(3)} s`;
+        })()
+        : '';
     return `#### ${key}
 - Maximum RSS: ${maxProcessRss.toFixed(2)} MB
 - Average RSS: ${avgProcessRss.toFixed(2)} MB
 - Number of measurements: ${data.rss.length}
-- Last measurement: ${lastRss.toFixed(2)} MB`;
+- Last measurement: ${lastRss.toFixed(2)} MB${gcStats}`;
 }).join('\n\n')}
 
-> Note: A detailed SVG graph and log file are available in the artifacts of this workflow run.`;
+${hasGcData ? `\n> GC chart is available in the artifacts as \`${gcSvgFile}\`.` : ''}
+                > Note: A detailed SVG graph, CSV report, and log file are available in the artifacts of this workflow run.`;
 
                 fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, newSummary);
             }

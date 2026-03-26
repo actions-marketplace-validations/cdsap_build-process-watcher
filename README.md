@@ -2,6 +2,10 @@
 
 [![GitHub Marketplace](https://img.shields.io/badge/action-marketplace-blue?logo=github)](https://github.com/marketplace/actions/build-process-watcher)
 
+<p align="center">
+  <img src="frontend/public/performance.gif" alt="Performance Demo">
+</p>
+
 Monitor memory usage of Java/Kotlin build processes (`GradleDaemon`, `GradleWorkerMain`, `KotlinCompileDaemon`) during CI builds. Track heap and RSS usage, generate charts, and visualize data in real-time dashboards.
 
 ---
@@ -11,9 +15,7 @@ Monitor memory usage of Java/Kotlin build processes (`GradleDaemon`, `GradleWork
 ### Local Mode (Artifacts Only)
 
 ```yaml
-- uses: cdsap/build-process-watcher@v0.4.1
-  with:
-    remote_monitoring: 'false'
+- uses: cdsap/build-process-watcher@v0.6.0
 ```
 
 Generates log files and charts as workflow artifacts.
@@ -21,17 +23,13 @@ Generates log files and charts as workflow artifacts.
 ### Remote Mode (Live Dashboard)
 
 ```yaml
-- uses: cdsap/build-process-watcher@v0.4.1
+- uses: cdsap/build-process-watcher@v0.6.0
   with:
     remote_monitoring: 'true'
-    collect_gc: 'true'  # Enabled by default, can be set to 'false' to disable
-    disable_summary_output: 'false'  # Set to 'true' to disable GitHub Actions summary when remote
 ```
 
-Data sent to cloud backend with live dashboard (3-hour retention).  
-Dashboard URL shown in job output.
-
-**Note:** By default, GC collection is enabled. Set `collect_gc: 'false'` to disable it. When using remote monitoring, you can disable the GitHub Actions summary output by setting `disable_summary_output: 'true'`.
+Data sent to cloud backend with live dashboard (24-hour retention).  
+Dashboard URL shown in job output. GC (garbage collection) monitoring is always enabled.
 
 ---
 
@@ -40,15 +38,42 @@ Dashboard URL shown in job output.
 | Input | Description | Default | Required |
 |-------|-------------|---------|----------|
 | `remote_monitoring` | Enable cloud dashboard | `false` | No |
-| `backend_url` | Custom backend URL | Default Cloud Run URL | No |
 | `run_id` | Custom run identifier | Auto-generated | No |
 | `log_file` | Local log filename | `build_process_watcher.log` | No |
 | `interval` | Polling interval (seconds) | `5` | No |
 | `debug` | Enable debug logging | `false` | No |
-| `collect_gc` | Enable garbage collection monitoring (requires Java processes) | `true` | No |
-| `disable_summary_output` | Disable GitHub Actions summary output when remote monitoring is enabled (only applies when `remote_monitoring` is `true`) | `false` | No |
-| `environment` | Environment name (production or staging) - used for auto-detecting default URLs | `production` | No |
-| `frontend_url` | Frontend URL for dashboard (optional - can also be set via FRONTEND_URL or FRONTEND_URL_STAGING env vars, will be auto-detected from backend_url/environment if not provided) | Auto-detected | No |
+| `disable_summary_output` | Disable GitHub Actions summary output | `false` | No |
+
+**Environment variables (for Remote Mode):** Set `BACKEND_URL` and `FRONTEND_URL` as env vars (e.g. from secrets) for custom URLs. If unset, default Cloud Run and dashboard URLs are used.
+
+---
+
+## 🧭 Behavior Matrix
+
+| Mode | Debug | Summary | Debug logs in artifacts | Notes |
+|------|-------|---------|-------------------------|-------|
+| Local | `false` | ✅ (default) | ❌ | CSV/SVG/log generated locally. |
+| Local | `true` | ✅ (default) | ✅ | Copies `backend_debug*.log` and `script_debug*.log` into artifacts. |
+| Local | `any` | ❌ (`disable_summary_output: true`) | depends on debug | Summary suppressed when disabled. |
+| Remote | `false` | ✅ (default) | ❌ | Dashboard URL shown; local artifacts if log exists. |
+| Remote | `true` | ✅ (default) | ✅ | Debug logs copied into artifacts. |
+| Remote | `any` | ❌ (`disable_summary_output: true`) | depends on debug | Summary suppressed when disabled. |
+
+---
+
+## 🧪 Run CI Locally with act
+
+You can execute the local CI workflow using `act`:
+
+```bash
+act -W .github/workflows/test-action-local.yml
+```
+
+To run a single job:
+
+```bash
+act -W .github/workflows/test-action-local.yml -j local-mode
+```
 
 ---
 
@@ -57,14 +82,14 @@ Dashboard URL shown in job output.
 ### Local Mode
 - `build_process_watcher.log` - Raw memory data
 - `memory_usage.svg` - SVG chart
-- `gc_time.svg` - GC time chart (if `collect_gc` is enabled)
+- `gc_time.svg` - GC time chart
 - GitHub Actions job summary with Mermaid chart
 
 ### Remote Mode
 - Live dashboard URL (in job output)
-- Data retention: 3 hours
+- Data retention: 24 hours
 - Real-time process monitoring
-- GC time metrics (if `collect_gc` is enabled)
+- GC time metrics
 - GitHub Actions job summary (unless `disable_summary_output: 'true'` is set)
 
 ---
@@ -90,11 +115,27 @@ The job summary includes:
 
 ---
 
+## 📂 Replay & Compare Runs
+
+The dashboard lets you:
+
+- **Replay a run** – Upload an exported JSON file to replay memory and GC charts offline.
+- **Compare runs** – Upload two JSON files to compare two runs side-by-side with a shared timeline.
+
+<p align="center">
+  <img src="frontend/public/reply.gif" alt="Replay Demo" width="600"><br><br>
+  <img src="frontend/public/compare.gif" alt="Compare Demo" width="600">
+</p>
+
+**Using without Remote Mode:** You don't need Remote Mode to use Replay and Compare. With Local Mode, the action generates JSON files in the workflow artifacts. Download the JSON from your artifacts and upload it to [Replay](https://process-watcher.web.app/replay.html) or [Compare](https://process-watcher.web.app/compare.html). You can also open these HTML files locally in your browser.
+
+---
+
 ## 🏗️ Architecture
 
 - **Frontend**: Firebase Hosting (static dashboard)
 - **Backend**: Google Cloud Run (Go API)
-- **Database**: Firestore (3-hour TTL)
+- **Database**: Firestore (24-hour TTL)
 
 ---
 

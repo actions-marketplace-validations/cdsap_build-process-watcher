@@ -3,13 +3,15 @@
 set -euo pipefail  # safer scripting: exit on error, unset vars, pipe errors
 
 INTERVAL="${1:-5}"
+ARG_BACKEND_URL="${2:-}"
+ARG_RUN_ID="${3:-}"
 PATTERNS=("GradleDaemon" "KotlinCompileDaemon" "GradleWorkerMain")
-LOG_FILE="build_process_watcher.log"
+LOG_FILE="${LOG_FILE:-build_process_watcher.log}"
 PID_FILE="monitor.pid"
 
 # Backend configuration
-BACKEND_URL="${BACKEND_URL:-https://build-process-watcher-backend-685615422311.us-central1.run.app}"
-RUN_ID="${RUN_ID:-build-$(date +%s)}"
+BACKEND_URL="${ARG_BACKEND_URL:-${BACKEND_URL:-https://build-process-watcher-backend-685615422311.us-central1.run.app}}"
+RUN_ID="${ARG_RUN_ID:-${RUN_ID:-build-$(date +%s)}}"
 ORG_REPO="${ORG_REPO:-local/dev}"
 JOB_ID="${JOB_ID:-$(date +%s)}"
 
@@ -36,9 +38,6 @@ DEBUG_MODE="${DEBUG_MODE:-false}"
 # Check if remote monitoring is enabled
 REMOTE_MONITORING="${REMOTE_MONITORING:-false}"
 
-# Check if GC collection is enabled
-COLLECT_GC="${COLLECT_GC:-false}"
-
 # Network timeout configuration (in seconds)
 # Default: 30 seconds total, 10 seconds connection timeout
 CURL_TIMEOUT="${CURL_TIMEOUT:-30}"
@@ -48,15 +47,15 @@ CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "📂 Current working directory: $(pwd)" >&2
     echo "🔧 Remote monitoring: $REMOTE_MONITORING" >&2
-    echo "🗑️  GC collection: $COLLECT_GC" >&2
 fi
 
-# Initialize log file with header
-if [ "$COLLECT_GC" = "true" ]; then
-    echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB | GC_Time_S" > "$LOG_FILE"
-else
-    echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB" > "$LOG_FILE"
-fi
+# Initialize log file with header (GC always enabled)
+echo "Session started: $(date '+%Y-%m-%d %H:%M:%S')" > "$LOG_FILE"
+echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB | GC_Time_S" >> "$LOG_FILE"
+
+# Process info file for VM flags (used by cleanup to include in JSON artifact)
+PROCESS_INFO_FILE="${LOG_FILE%.log}.process_info"
+: > "$PROCESS_INFO_FILE"
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "✅ Log file created: $LOG_FILE" >&2
     echo "📁 Full log file path: $(pwd)/$LOG_FILE" >&2
@@ -78,7 +77,6 @@ echo "Backend URL: $BACKEND_URL" >> "$SCRIPT_DEBUG_LOG"
 echo "Start Time: $(date)" >> "$SCRIPT_DEBUG_LOG"
 echo "DEBUG_MODE: $DEBUG_MODE" >> "$SCRIPT_DEBUG_LOG"
 echo "REMOTE_MONITORING: $REMOTE_MONITORING" >> "$SCRIPT_DEBUG_LOG"
-echo "COLLECT_GC: $COLLECT_GC" >> "$SCRIPT_DEBUG_LOG"
 echo "INTERVAL: $INTERVAL" >> "$SCRIPT_DEBUG_LOG"
 echo "PATTERNS: ${PATTERNS[*]}" >> "$SCRIPT_DEBUG_LOG"
 echo "PID: $$" >> "$SCRIPT_DEBUG_LOG"
@@ -90,6 +88,21 @@ log_script() {
 }
 
 log_script "Script started successfully"
+
+process_exists() {
+    local pid="$1"
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    # Fallback to ps for environments where kill -0 isn't reliable
+    if ps -p "$pid" > /dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
 
 # Log network environment (proxy, DNS, etc.) for diagnostics
 log_script "Network environment diagnostics:"
@@ -492,12 +505,14 @@ EOF
     log_script "send_to_backend: Function completed for PID $pid"
 }
 
-# Request initial authentication token
-if [ "$DEBUG_MODE" = "true" ]; then
-    echo "🔐 Requesting initial authentication token..." >&2
-fi
-if ! get_auth_token; then
-    echo "⚠️  Failed to get initial authentication token - will retry on first send" >&2
+# Request initial authentication token (remote monitoring only)
+if [ "$REMOTE_MONITORING" = "true" ]; then
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo "🔐 Requesting initial authentication token..." >&2
+    fi
+    if ! get_auth_token; then
+        echo "⚠️  Failed to get initial authentication token - will retry on first send" >&2
+    fi
 fi
 
 # Function to save summary statistics to file for cleanup script
@@ -515,11 +530,9 @@ trap 'save_summary; echo "🧹 Monitor exiting normally. Running cleanup."; CLEA
 # Create PID file
 echo $$ > "$PID_FILE"
 
-# Start logging
-echo "Starting memory monitor with backend integration at $(date)" > "$LOG_FILE"
-echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB" >> "$LOG_FILE"
+# Log file was already initialized with correct header at startup (lines 54-62)
 
-# Test backend connectivity and fallback to local mode if needed
+# Test backend connectivity
 # Skip backend entirely if remote monitoring is disabled
 BACKEND_AVAILABLE=false
 
@@ -544,69 +557,11 @@ else
     fi
 fi
 
-# If backend is not available, switch to local monitoring
 if [ "$BACKEND_AVAILABLE" = "false" ]; then
-    echo "📝 Switching to local monitoring mode - data will be logged to: $LOG_FILE" >&2
-    if [ "$DEBUG_MODE" = "true" ]; then
-        echo "🔄 Starting local monitoring loop..." >&2
-        echo "🔍 Looking for Java processes matching patterns: ${PATTERNS[*]}" >&2
-    fi
-    
-    while true; do
-        CURRENT_TIME=$(date +%s)
-        ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-        TIMESTAMP=$(printf "%02d:%02d:%02d" $((ELAPSED_TIME/3600)) $((ELAPSED_TIME%3600/60)) $((ELAPSED_TIME%60)))
-        jps_output=$(jps)
-        
-        if [ "$DEBUG_MODE" = "true" ]; then
-            echo "🔍 [${TIMESTAMP}] Checking for Java processes..." >&2
-            echo "📋 jps output: $jps_output" >&2
-        fi
-
-        # Array to collect all process data for this timestamp
-        declare -a process_data=()
-
-        while IFS= read -r line; do
-            PID=$(echo "$line" | awk '{print $1}')
-            NAME=$(echo "$line" | awk '{print $2}')
-            
-            # Check if this process matches any of our patterns
-            for pattern in "${PATTERNS[@]}"; do
-                if [[ "$NAME" == *"$pattern"* ]]; then
-                    # Get memory info for this process
-                    if [ -f "/proc/$PID/status" ]; then
-                        HEAP_USED=$(ps -p "$PID" -o rss= 2>/dev/null | awk '{print int($1/1024)}' || echo "0")
-                        HEAP_CAP=$(ps -p "$PID" -o vsz= 2>/dev/null | awk '{print int($1/1024)}' || echo "0")
-                        RSS=$(ps -p "$PID" -o rss= 2>/dev/null | awk '{print int($1/1024)}' || echo "0")
-                        
-                        # Store data for this timestamp
-                        if [ "$COLLECT_GC" = "true" ]; then
-                          process_data+=("$ELAPSED_TIME | $PID | $NAME | $HEAP_USED | $HEAP_CAP | $RSS | N/A")
-                        else
-                          process_data+=("$ELAPSED_TIME | $PID | $NAME | $HEAP_USED | $HEAP_CAP | $RSS")
-                        fi
-                    fi
-                    break
-                fi
-            done
-        done <<< "$jps_output"
-
-        # Log all processes found at this timestamp
-        for data in "${process_data[@]}"; do
-            echo "$data" >> "$LOG_FILE"
-            if [ "$DEBUG_MODE" = "true" ]; then
-                echo "📊 [${TIMESTAMP}] $data" >&2
-            fi
-        done
-
-        if [ "$DEBUG_MODE" = "true" ]; then
-            echo "📊 [${TIMESTAMP}] Monitoring cycle complete. Sleeping for ${INTERVAL}s..." >&2
-        fi
-        sleep "$INTERVAL"
-    done
+    echo "📝 Data will be logged to: $LOG_FILE (no backend upload)" >&2
 fi
 
-# Main loop
+# Single unified monitoring loop (same logic for remote and local)
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "🔄 Starting monitoring loop..." >&2
     echo "🔍 Looking for Java processes matching patterns: ${PATTERNS[*]}" >&2
@@ -630,11 +585,10 @@ while true; do
   
   log_script "=== Iteration $ITERATION at $TIMESTAMP (elapsed: ${ELAPSED_TIME}s) ==="
   
-  # Log network connectivity check every 10 iterations (approximately every 50 seconds with 5s interval)
-  if [ $((ITERATION % 10)) -eq 0 ]; then
+  # Log network connectivity check every 10 iterations (only when backend is in use)
+  if [ "$BACKEND_AVAILABLE" = "true" ] && [ $((ITERATION % 10)) -eq 0 ]; then
     log_script "Network connectivity check (iteration $ITERATION)"
     if command -v curl >/dev/null 2>&1; then
-      # Don't use 'local' here - we're not in a function
       connectivity_test=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "$BACKEND_URL/healthz" 2>&1 || echo "FAILED")
       log_script "Backend health check result: $connectivity_test"
       if [ "$connectivity_test" != "200" ] && [ "$connectivity_test" != "FAILED" ]; then
@@ -680,6 +634,11 @@ while true; do
       log_script "Comparing NAME '$NAME' with PATTERN '$PATTERN'"
       if [[ "$NAME" == "$PATTERN" ]]; then
         log_script "MATCH FOUND! PID $PID ($NAME) matches pattern '$PATTERN'"
+
+        if ! process_exists "$PID"; then
+          log_script "Skipping PID $PID ($NAME) - process no longer exists"
+          continue
+        fi
         
         # Check if this is a new process we haven't seen before and get VM flags
         if [ -z "${seen_pids[$PID]:-}" ]; then
@@ -701,12 +660,16 @@ while true; do
             if [ "$DEBUG_MODE" = "true" ]; then
               echo "✅ Got VM flags for PID $PID" >&2
             fi
-            # Send process info to backend
-            log_script "Calling send_process_info_to_backend for PID $PID"
-            if send_process_info_to_backend "$PID" "$NAME" "$VM_FLAGS_JSON"; then
+            # Write VM flags to process_info file for JSON artifact (used by cleanup)
+            printf '%s\t%s\t%s\n' "$PID" "$NAME" "$VM_FLAGS_JSON" >> "$PROCESS_INFO_FILE"
+            # Send process info to backend (only when backend is available)
+            if [ "$BACKEND_AVAILABLE" = "true" ]; then
+              log_script "Calling send_process_info_to_backend for PID $PID"
+              if send_process_info_to_backend "$PID" "$NAME" "$VM_FLAGS_JSON"; then
               log_script "send_process_info_to_backend succeeded for PID $PID"
             else
               log_script "send_process_info_to_backend failed for PID $PID (continuing anyway)"
+            fi
             fi
           else
             log_script "Could not get VM flags for PID $PID (exit: $vm_flags_exit, json length: ${#VM_FLAGS_JSON})"
@@ -729,15 +692,9 @@ while true; do
           RSS_MB=$(awk "BEGIN { printf \"%.1f\", $RSS_KB / 1024 }")
 
           if [[ -z "$GC_LINE" ]]; then
-            if [ "$COLLECT_GC" = "true" ]; then
-              echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB | N/A" >> "$LOG_FILE"
-              # Store process data for batch sending
-              process_data+=("$TIMESTAMP|$PID|$NAME|0|0|${RSS_MB}MB|N/A")
-            else
-              echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB" >> "$LOG_FILE"
-              # Store process data for batch sending
-              process_data+=("$TIMESTAMP|$PID|$NAME|0|0|${RSS_MB}MB")
-            fi
+            echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB | N/A" >> "$LOG_FILE"
+            # Store process data for batch sending
+            process_data+=("$TIMESTAMP|$PID|$NAME|0|0|${RSS_MB}MB|N/A")
           else
             EC=$(echo "$GC_LINE" | awk '{print $5}')
             EU=$(echo "$GC_LINE" | awk '{print $6}')
@@ -747,28 +704,22 @@ while true; do
             HEAP_USED_MB=$(awk "BEGIN { printf \"%.1f\", ($EU + $OU) / 1024 }")
             HEAP_CAP_MB=$(awk "BEGIN { printf \"%.1f\", ($EC + $OC) / 1024 }")
 
-            if [ "$COLLECT_GC" = "true" ]; then
-              # Extract GC time from jstat output
-              # YGCT (column 14) = Young generation GC time in seconds
-              # FGCT (column 16) = Full GC time in seconds
-              # Total GC time = YGCT + FGCT (keep in seconds)
-              # This works consistently across all GC collectors (Parallel, G1, Serial, CMS, etc.)
-              YGCT=$(echo "$GC_LINE" | awk '{print $14}' 2>/dev/null || echo "0")
-              FGCT=$(echo "$GC_LINE" | awk '{print $16}' 2>/dev/null || echo "0")
-              # Calculate total GC time (keep in seconds, as reported by jstat)
-              if [ "$YGCT" != "N/A" ] && [ "$FGCT" != "N/A" ] && [ -n "$YGCT" ] && [ -n "$FGCT" ]; then
-                GC_TIME_S=$(awk "BEGIN { printf \"%.3f\", $YGCT + $FGCT }" 2>/dev/null || echo "N/A")
-              else
-                GC_TIME_S="N/A"
-              fi
-              echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB | ${GC_TIME_S}s" >> "$LOG_FILE"
-              # Store process data for batch sending
-              process_data+=("$TIMESTAMP|$PID|$NAME|${HEAP_USED_MB}MB|${HEAP_CAP_MB}MB|${RSS_MB}MB|${GC_TIME_S}s")
+            # Extract GC time from jstat output
+            # YGCT (column 14) = Young generation GC time in seconds
+            # FGCT (column 16) = Full GC time in seconds
+            # Total GC time = YGCT + FGCT (keep in seconds)
+            # This works consistently across all GC collectors (Parallel, G1, Serial, CMS, etc.)
+            YGCT=$(echo "$GC_LINE" | awk '{print $14}' 2>/dev/null || echo "0")
+            FGCT=$(echo "$GC_LINE" | awk '{print $16}' 2>/dev/null || echo "0")
+            # Calculate total GC time (keep in seconds, as reported by jstat)
+            if [ "$YGCT" != "N/A" ] && [ "$FGCT" != "N/A" ] && [ -n "$YGCT" ] && [ -n "$FGCT" ]; then
+              GC_TIME_S=$(awk "BEGIN { printf \"%.3f\", $YGCT + $FGCT }" 2>/dev/null || echo "N/A")
             else
-              echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB" >> "$LOG_FILE"
-              # Store process data for batch sending
-              process_data+=("$TIMESTAMP|$PID|$NAME|${HEAP_USED_MB}MB|${HEAP_CAP_MB}MB|${RSS_MB}MB")
+              GC_TIME_S="N/A"
             fi
+            echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB | ${GC_TIME_S}s" >> "$LOG_FILE"
+            # Store process data for batch sending
+            process_data+=("$TIMESTAMP|$PID|$NAME|${HEAP_USED_MB}MB|${HEAP_CAP_MB}MB|${RSS_MB}MB|${GC_TIME_S}s")
           fi
         } || { 
           log_script "ERROR: Failed to process memory data for PID $PID ($NAME) at $TIMESTAMP"
@@ -790,8 +741,8 @@ while true; do
   sends_succeeded=0
   sends_failed=0
 
-  # Send all collected process data with the same timestamp
-  if [ ${#process_data[@]} -gt 0 ]; then
+  # Send all collected process data to backend (only when backend is available)
+  if [ ${#process_data[@]} -gt 0 ] && [ "$BACKEND_AVAILABLE" = "true" ]; then
     log_script "Preparing to send ${#process_data[@]} process data entries to backend"
     if [ "$DEBUG_MODE" = "true" ]; then
         echo "📤 [${TIMESTAMP}] Sending ${#process_data[@]} processes to backend..." >&2
@@ -799,31 +750,21 @@ while true; do
     for data_line in "${process_data[@]}"; do
       sends_attempted=$((sends_attempted + 1))
       log_script "Sending data line: '$data_line'"
-      if [ "$COLLECT_GC" = "true" ]; then
-        IFS='|' read -r ts pid name heap_used heap_cap rss gc_time <<< "$data_line"
-        log_script "Calling send_to_backend with GC data for PID $pid"
-        if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB" "$gc_time"; then
-          sends_succeeded=$((sends_succeeded + 1))
-          log_script "send_to_backend succeeded for PID $pid"
-        else
-          sends_failed=$((sends_failed + 1))
-          log_script "send_to_backend failed for PID $pid"
-        fi
+      IFS='|' read -r ts pid name heap_used heap_cap rss gc_time <<< "$data_line"
+      log_script "Calling send_to_backend with GC data for PID $pid"
+      if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB" "$gc_time"; then
+        sends_succeeded=$((sends_succeeded + 1))
+        log_script "send_to_backend succeeded for PID $pid"
       else
-        IFS='|' read -r ts pid name heap_used heap_cap rss <<< "$data_line"
-        log_script "Calling send_to_backend without GC data for PID $pid"
-        if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB"; then
-          sends_succeeded=$((sends_succeeded + 1))
-          log_script "send_to_backend succeeded for PID $pid"
-        else
-          sends_failed=$((sends_failed + 1))
-          log_script "send_to_backend failed for PID $pid"
-        fi
+        sends_failed=$((sends_failed + 1))
+        log_script "send_to_backend failed for PID $pid"
       fi
     done
     log_script "Finished sending: $sends_attempted attempted, $sends_succeeded succeeded, $sends_failed failed"
+  elif [ ${#process_data[@]} -gt 0 ]; then
+    log_script "Skipping backend send (BACKEND_AVAILABLE=false) - data logged to $LOG_FILE"
   else
-    log_script "No process data to send (process_data array is empty)"
+    log_script "No process data this iteration (process_data array is empty)"
   fi
 
   # Log iteration summary every 10 iterations or if there were failures
