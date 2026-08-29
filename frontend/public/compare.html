@@ -4,6 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Build Process Watcher - Compare JSON Runs</title>
+    <meta name="description" content="Compare two Build Process Watcher JSON reports to examine Gradle and Kotlin build performance differences.">
+    <meta name="robots" content="noindex, follow">
+    <link rel="canonical" href="https://process-watcher.web.app/compare.html">
+    <meta property="og:title" content="Build Process Watcher - Compare JSON Runs">
+    <meta property="og:description" content="Compare two Build Process Watcher JSON reports to examine Gradle and Kotlin build performance differences.">
+    <meta property="og:url" content="https://process-watcher.web.app/compare.html">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://process-watcher.web.app/gha_log.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Build Process Watcher - Compare JSON Runs">
+    <meta name="twitter:description" content="Compare two Build Process Watcher JSON reports to examine Gradle and Kotlin build performance differences.">
+    <meta name="twitter:image" content="https://process-watcher.web.app/gha_log.png">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/config.js"></script>
@@ -33,6 +45,8 @@
         }
 
         .container {
+            width: 100%;
+            min-width: 0;
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
@@ -84,6 +98,7 @@
         }
 
         .compare-controls input[type="file"] {
+            max-width: 100%;
             border: 1px solid #e5e7eb;
             border-radius: 0.5rem;
             padding: 0.4rem 0.6rem;
@@ -91,6 +106,8 @@
         }
 
         .compare-section {
+            width: 100%;
+            min-width: 0;
             display: none;
             background: #f9fafb;
             border: 1px solid #e5e7eb;
@@ -109,8 +126,17 @@
 
         .compare-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
             gap: 2rem;
+        }
+
+        .compare-column,
+        .chart-container,
+        .chart-wrapper,
+        .js-plotly-plot,
+        .plot-container {
+            min-width: 0;
+            max-width: 100%;
         }
 
         .compare-column h3 {
@@ -157,6 +183,12 @@
             flex-wrap: wrap;
         }
 
+        .replay-controls .timeline input[type="range"] {
+            flex: 1 1 12rem;
+            min-width: 0;
+            max-width: 100%;
+        }
+
         .btn {
             background: #2563eb;
             color: white;
@@ -195,17 +227,25 @@
 
         @media (max-width: 768px) {
             .compare-grid {
-                grid-template-columns: 1fr;
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            .compare-controls,
+            .chart-container {
+                padding: 0.75rem !important;
             }
         }
     </style>
+    <link rel="stylesheet" href="/bpw-ui.css">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>Compare JSON Runs</h1>
-            <div class="meta">Upload two JSON files to compare memory, GC, and process configuration.</div>
-            <a class="back-link back-home-link" href="https://process-watcher.web.app">← Back to Home</a>
+            <div class="meta">Upload two JSON files to compare memory, GC, JIT, class loading, and process configuration.</div>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.75rem; margin-top:0.5rem;">
+                <a class="back-link back-home-link" href="https://process-watcher.web.app">← Back to Home</a>
+            </div>
         </header>
 
         <section class="compare-controls">

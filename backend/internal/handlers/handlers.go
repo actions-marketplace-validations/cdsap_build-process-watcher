@@ -1,28 +1,82 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cdsap/build-process-watcher/backend/internal/auth"
+	"github.com/cdsap/build-process-watcher/backend/internal/exportqueue"
 	"github.com/cdsap/build-process-watcher/backend/internal/models"
 	"github.com/cdsap/build-process-watcher/backend/internal/storage"
+	"github.com/cdsap/build-process-watcher/backend/pkg/predictor"
 )
 
 // Handlers contains all HTTP handlers
 type Handlers struct {
-	storage *storage.Client
+	storage              *storage.Client
+	export               *exportqueue.Scheduler
+	predictor            predictor.Provider
+	predictorCheckpoints []int
+	fallbackClassifier   predictor.FallbackClassifier
 }
 
-// NewHandlers creates a new handlers instance
-func NewHandlers(storageClient *storage.Client) *Handlers {
-	return &Handlers{
-		storage: storageClient,
+// NewHandlers creates a new handlers instance. export may be nil (no BigQuery jobs).
+func NewHandlers(storageClient *storage.Client, export *exportqueue.Scheduler) *Handlers {
+	return NewHandlersWithPredictor(storageClient, export, predictor.NoopProvider{}, nil, nil)
+}
+
+// NewHandlersWithPredictor creates handlers with an optional prediction provider
+// and optional fallback classifier supplied by the composition root.
+func NewHandlersWithPredictor(storageClient *storage.Client, export *exportqueue.Scheduler, predictionProvider predictor.Provider, checkpoints []int, fallbackClassifier predictor.FallbackClassifier) *Handlers {
+	if predictionProvider == nil {
+		predictionProvider = predictor.NoopProvider{}
 	}
+	if fallbackClassifier == nil {
+		fallbackClassifier = predictor.DefaultFallbackClassifier
+	}
+	return &Handlers{
+		storage:              storageClient,
+		export:               export,
+		predictor:            predictionProvider,
+		predictorCheckpoints: checkpoints,
+		fallbackClassifier:   fallbackClassifier,
+	}
+}
+
+// validateRunBearerToken verifies the Authorization Bearer token for a run write.
+// Callers write the HTTP response using the returned status and message when ok is false.
+func validateRunBearerToken(r *http.Request, runID string) (status int, message string, ok bool) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		log.Printf("No authorization header provided for run_id: %s from %s", runID, r.RemoteAddr)
+		return http.StatusUnauthorized, "Authorization header required", false
+	}
+
+	tokenParts := strings.Split(authHeader, " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+		log.Printf("Invalid authorization header format for run_id: %s from %s", runID, r.RemoteAddr)
+		return http.StatusUnauthorized, "Invalid authorization header format", false
+	}
+
+	token := tokenParts[1]
+	valid, err := auth.ValidateToken(token, runID)
+	if err != nil {
+		log.Printf("Token validation failed for run_id: %s: %v", runID, err)
+		return http.StatusUnauthorized, "Token validation failed", false
+	}
+
+	if !valid {
+		log.Printf("Invalid token for run_id: %s from %s", runID, r.RemoteAddr)
+		return http.StatusUnauthorized, "Invalid token", false
+	}
+
+	return 0, "", true
 }
 
 // Health returns a simple health check
@@ -39,6 +93,17 @@ func (h *Handlers) Auth(w http.ResponseWriter, r *http.Request) {
 	if runID == "" {
 		http.Error(w, "run_id is required", http.StatusBadRequest)
 		return
+	}
+
+	if h.storage != nil && r.URL.Query().Get("export_to_bigquery") == "true" {
+		if err := h.storage.SetRunExportToBigquery(runID, true); err != nil {
+			log.Printf("Warning: could not persist export_to_bigquery for run %s: %v", runID, err)
+		}
+	}
+	if h.storage != nil && boolQuery(r, "predictive_reliability") {
+		if err := h.storage.SetRunPredictiveReliability(runID, true); err != nil {
+			log.Printf("Warning: could not persist predictive_reliability for run %s: %v", runID, err)
+		}
 	}
 
 	log.Printf("🔐 Auth request for run_id: %s", runID)
@@ -93,33 +158,8 @@ func (h *Handlers) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify token
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		log.Printf("No authorization header provided")
-		http.Error(w, "Authorization header required", http.StatusUnauthorized)
-		return
-	}
-
-	// Extract token from "Bearer <token>"
-	tokenParts := strings.Split(authHeader, " ")
-	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-		log.Printf("Invalid authorization header format")
-		http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
-		return
-	}
-
-	token := tokenParts[1]
-	valid, err := auth.ValidateToken(token, req.RunID)
-	if err != nil {
-		log.Printf("Token validation failed: %v", err)
-		http.Error(w, "Token validation failed", http.StatusUnauthorized)
-		return
-	}
-
-	if !valid {
-		log.Printf("Invalid token for run_id: %s", req.RunID)
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+	if status, message, ok := validateRunBearerToken(r, req.RunID); !ok {
+		http.Error(w, message, status)
 		return
 	}
 
@@ -169,6 +209,10 @@ func (h *Handlers) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		startTime = runDoc.StartTime
+		if startTime.IsZero() {
+			startTime = time.Now()
+			log.Printf("Run %s had no StartTime yet; using current time: %v", req.RunID, startTime)
+		}
 		log.Printf("Using existing StartTime: %v", startTime)
 	}
 
@@ -186,10 +230,66 @@ func (h *Handlers) Ingest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	h.evaluatePredictionCheckpoints(r.Context(), req.RunID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "samples": fmt.Sprintf("%d", len(samples))})
+}
+
+func (h *Handlers) evaluatePredictionCheckpoints(ctx context.Context, runID string) {
+	if h.storage == nil || !predictor.Enabled(h.predictor) || len(h.predictorCheckpoints) == 0 {
+		return
+	}
+
+	runDoc, err := h.storage.GetRun(runID)
+	if err != nil {
+		log.Printf("Prediction skipped: could not load run %s: %v", runID, err)
+		return
+	}
+	if !runDoc.PredictiveReliability {
+		return
+	}
+	processDoc, err := h.storage.GetProcesses(runID)
+	if err != nil {
+		log.Printf("Prediction continuing without process info for run %s: %v", runID, err)
+		processDoc = &models.ProcessDoc{
+			RunID:       runID,
+			ProcessInfo: make(map[string]models.ProcessInfo),
+		}
+	}
+
+	pending := predictor.PendingCheckpoints(runDoc.Samples, runDoc.PredictionCheckpoints, h.predictorCheckpoints)
+	for _, checkpointWindow := range pending {
+		checkpoint, err := h.predictor.Predict(ctx, predictor.RunSnapshot{
+			RunID:                 runID,
+			Samples:               runDoc.Samples,
+			ProcessInfo:           processDoc.ProcessInfo,
+			ExistingCheckpoints:   runDoc.PredictionCheckpoints,
+			ConfiguredCheckpoints: h.predictorCheckpoints,
+			Now:                   time.Now(),
+		}, checkpointWindow)
+		if err != nil {
+			_, _, _, checkpoint = predictor.FallbackForError(err, checkpointWindow, time.Now(), h.fallbackClassifier)
+			log.Printf("Prediction provider failed for run %s checkpoint %ds: %v", runID, checkpointWindow, err)
+		}
+		if checkpoint.ObservationWindowS == 0 {
+			checkpoint.ObservationWindowS = checkpointWindow
+		}
+		if checkpoint.CreatedAt.IsZero() {
+			checkpoint.CreatedAt = time.Now()
+		}
+		if err := h.storage.StorePredictionCheckpoint(runID, checkpoint); err != nil {
+			log.Printf("Prediction checkpoint store failed for run %s checkpoint %ds: %v", runID, checkpointWindow, err)
+			continue
+		}
+		runDoc.PredictionCheckpoints = storage.MergePredictionCheckpoint(runDoc.PredictionCheckpoints, checkpoint)
+	}
+}
+
+func boolQuery(r *http.Request, key string) bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(r.URL.Query().Get(key)))
+	return err == nil && enabled
 }
 
 // GetRun retrieves run data
@@ -231,13 +331,16 @@ func (h *Handlers) GetRun(w http.ResponseWriter, r *http.Request) {
 	// Auto-finish stale runs after 5 minutes without updates.
 	if !runDoc.Finished && time.Since(runDoc.UpdatedAt) > 5*time.Minute {
 		log.Printf("Run %s stale for >5m; auto-finishing", runID)
-		if err := h.storage.MarkRunAsFinished(runID); err != nil {
+		if newlyFinished, err := h.storage.MarkRunAsFinished(runID); err != nil {
 			log.Printf("Failed to auto-finish run %s: %v", runID, err)
 		} else {
 			now := time.Now()
 			runDoc.Finished = true
 			runDoc.FinishedAt = now
 			runDoc.UpdatedAt = now
+			if newlyFinished && h.export != nil {
+				h.export.Run(runID)
+			}
 		}
 	}
 
@@ -255,6 +358,7 @@ func (h *Handlers) GetRun(w http.ResponseWriter, r *http.Request) {
 	var response models.RunResponse
 	response.Samples = runDoc.Samples
 	response.ProcessInfo = processDoc.ProcessInfo
+	response.PredictionCheckpoints = runDoc.PredictionCheckpoints
 	response.Finished = runDoc.Finished
 	response.UpdatedAt = runDoc.UpdatedAt
 	if !runDoc.FinishedAt.IsZero() {
@@ -300,45 +404,22 @@ func (h *Handlers) FinishRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify JWT token
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		log.Printf("⚠️  Finish request without authorization from %s for run: %s", r.RemoteAddr, runID)
-		http.Error(w, "Authorization header required", http.StatusUnauthorized)
-		return
-	}
-
-	// Extract token from "Bearer <token>"
-	tokenParts := strings.Split(authHeader, " ")
-	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-		log.Printf("⚠️  Invalid authorization header format from %s", r.RemoteAddr)
-		http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
-		return
-	}
-
-	token := tokenParts[1]
-	valid, err := auth.ValidateToken(token, runID)
-	if err != nil {
-		log.Printf("⚠️  Token validation failed for run %s: %v", runID, err)
-		http.Error(w, "Token validation failed", http.StatusUnauthorized)
-		return
-	}
-
-	if !valid {
-		log.Printf("⚠️  Invalid token for run %s from %s", runID, r.RemoteAddr)
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+	if status, message, ok := validateRunBearerToken(r, runID); !ok {
+		http.Error(w, message, status)
 		return
 	}
 
 	log.Printf("✅ Token validated successfully for finishing run: %s", runID)
 	log.Printf("Manually finishing run: %s", runID)
 
-	// Mark the run as finished
-	err = h.storage.MarkRunAsFinished(runID)
+	newlyFinished, err := h.storage.MarkRunAsFinished(runID)
 	if err != nil {
 		log.Printf("Error finishing run %s: %v", runID, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
+	}
+	if newlyFinished && h.export != nil {
+		h.export.Run(runID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Build Process Watcher - Run Dashboard</title>
+    <meta name="robots" content="noindex, follow">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/config.js"></script>
@@ -432,10 +433,15 @@
             }
             
             .chart-wrapper {
-                min-width: 400px;
+                min-width: 0;
             }
         }
     </style>
+    <link rel="stylesheet" href="/bpw-ui.css">
+    <link rel="stylesheet" href="/bpw-experiment.css">
+    <script src="/experiment-layout.js"></script>
+    <script src="/chart-studio.js"></script>
+    <script src="/build-story.js"></script>
 </head>
 <body>
     <div class="container">
@@ -463,6 +469,8 @@
             attachLegendVisibilityHandlers,
             hasGCData,
             hasRatioData,
+            hasJITData,
+            hasClassLoadingData,
             buildColorMap,
             buildTotalRssSeries,
             buildForwardFilledSeries,
@@ -478,6 +486,7 @@
         let refreshInterval = parseInt(localStorage.getItem('refreshInterval')) || 60; // Default 60 seconds
         let refreshTimer = null;
         let lastRefreshTime = null;
+        let activeRunDashboardTab = 'dashboard';
         
         if (!runId || runId === 'runs' || runId === '') {
             document.getElementById('content').innerHTML = `
@@ -512,22 +521,75 @@
             }
         }
 
+        function resizeRunDashboardCharts() {
+            if (!window.Plotly || typeof Plotly.Plots?.resize !== 'function') return;
+            [
+                'chart',
+                'gc-chart',
+                'rss-heap-chart',
+                'jit-time-chart',
+                'classes-loaded-chart',
+                'class-rate-chart',
+            ].forEach((id) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                try {
+                    Plotly.Plots.resize(el);
+                } catch (_) {
+                    // Chart may not be initialized yet.
+                }
+            });
+        }
+
+        function setRunDashboardTab(tab) {
+            activeRunDashboardTab = tab === 'predictions' ? 'predictions' : 'dashboard';
+            const tabs = document.querySelectorAll('.run-dashboard-tab[data-run-tab]');
+            const dashboardPanel = document.getElementById('run-panel-dashboard');
+            const predictionsPanel = document.getElementById('run-panel-predictions');
+            tabs.forEach((button) => {
+                const selected = button.getAttribute('data-run-tab') === activeRunDashboardTab;
+                button.classList.toggle('is-active', selected);
+                button.setAttribute('aria-selected', selected ? 'true' : 'false');
+                button.tabIndex = selected ? 0 : -1;
+            });
+            if (dashboardPanel) dashboardPanel.hidden = activeRunDashboardTab !== 'dashboard';
+            if (predictionsPanel) predictionsPanel.hidden = activeRunDashboardTab !== 'predictions';
+            if (activeRunDashboardTab === 'dashboard') {
+                requestAnimationFrame(() => resizeRunDashboardCharts());
+            }
+        }
+
+        function bindRunDashboardTabs() {
+            document.querySelectorAll('[data-run-tab]').forEach((el) => {
+                el.addEventListener('click', () => {
+                    setRunDashboardTab(el.getAttribute('data-run-tab'));
+                });
+            });
+            setRunDashboardTab(activeRunDashboardTab || 'dashboard');
+        }
+
         async function loadRunData(runId) {
             const backendUrl = window.BUILD_PROCESS_WATCHER_CONFIG?.backendUrl || 'https://build-process-watcher-backend-685615422311.us-central1.run.app';
+            let response;
             
             try {
-                const response = await fetch(`${backendUrl}/runs/${runId}`);
+                response = await fetch(`${backendUrl}/runs/${runId}`);
                 
                 if (!response.ok) {
-                    if (response.status === 404) {
-                        showNotFound(runId);
+                    console.error('Run data request failed:', {
+                        runId,
+                        status: response.status,
+                        statusText: response.statusText
+                    });
+                    if (response.status === 404 || response.status === 410) {
+                        showUnavailableRun('not-found');
                     } else {
-                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        showUnavailableRun('server');
                     }
                     return;
                 }
 
-                const data = await response.json();
+                const data = CompareShared.normalizeReportData(await response.json());
                 lastRefreshTime = new Date();
                 renderDashboard(runId, data);
                 window.currentRunData = data;
@@ -539,8 +601,8 @@
                 }
                 
             } catch (error) {
-                console.error('Error loading run data:', error);
-                showError(error.message);
+                console.error('Run data request could not be completed:', { runId, error });
+                showUnavailableRun(response ? 'server' : 'connectivity');
             }
         }
 
@@ -553,6 +615,8 @@
             
             // Calculate metrics for each process and overall
             let maxRssAllProcesses = 0;
+            let maxHeapAllProcesses = 0;
+            let maxGcTimeAllProcesses = 0;
             const processMetrics = {};
             
             // Calculate metrics per process
@@ -561,6 +625,11 @@
                 let maxRss = 0;
                 let maxHeap = 0;
                 let maxGCTimeSeconds = 0;
+                let finalCompiledMethods = null;
+                let finalJITTimeMs = null;
+                let finalClassesLoaded = null;
+                let minTimestamp = Number.POSITIVE_INFINITY;
+                let maxTimestamp = 0;
                 
                 processSamples.forEach(sample => {
                     if (sample.RSS && sample.RSS > maxRss) {
@@ -576,13 +645,31 @@
                             maxGCTimeSeconds = gcSeconds;
                         }
                     }
+                    if (Number.isFinite(Number(sample.JITCompiledMethods))) finalCompiledMethods = Number(sample.JITCompiledMethods);
+                    if (Number.isFinite(Number(sample.JITCompilationTimeMs))) finalJITTimeMs = Number(sample.JITCompilationTimeMs);
+                    if (Number.isFinite(Number(sample.ClassesLoaded))) finalClassesLoaded = Number(sample.ClassesLoaded);
+                    if (sample.Timestamp && sample.Timestamp < minTimestamp) minTimestamp = sample.Timestamp;
+                    if (sample.Timestamp && sample.Timestamp > maxTimestamp) maxTimestamp = sample.Timestamp;
                 });
                 
                 processMetrics[pid] = {
                     maxRss: maxRss,
                     maxHeap: maxHeap,
-                    totalGCTime: maxGCTimeSeconds
+                    totalGCTime: maxGCTimeSeconds,
+                    finalCompiledMethods,
+                    finalJITTimeMs,
+                    finalClassesLoaded,
+                    durationSeconds: Number.isFinite(minTimestamp) && maxTimestamp >= minTimestamp
+                        ? Math.max(0, (maxTimestamp - minTimestamp) / 1000)
+                        : 0,
+                    sampleCount: processSamples.length
                 };
+                if (maxHeap > maxHeapAllProcesses) {
+                    maxHeapAllProcesses = maxHeap;
+                }
+                if (maxGCTimeSeconds > maxGcTimeAllProcesses) {
+                    maxGcTimeAllProcesses = maxGCTimeSeconds;
+                }
                 
             }
 
@@ -620,56 +707,195 @@
                 }
             });
             
+            const formatDur = (s) => s < 60 ? s + 's' : (Math.floor(s / 60) + 'm' + (s % 60 ? ' ' + Math.round(s % 60) + 's' : ''));
+            const formatPredictionValue = (value, unit) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(Number(value) >= 1000 ? 0 : 1)} ${unit}` : 'N/A';
+            const formatRiskScore = (score) => {
+                if (!Number.isFinite(Number(score))) return 'N/A';
+                const n = Number(score);
+                if (n <= 1 && n >= 0) return n.toFixed(2);
+                return n >= 100 ? n.toFixed(0) : n.toFixed(1);
+            };
+            const predictionRiskClass = (riskLevel) => ['low', 'elevated', 'high'].includes(riskLevel) ? riskLevel : 'unknown';
+            const predictionStatusClass = (status) => ['ready', 'pending', 'skipped', 'error'].includes(status) ? status : 'unknown';
+            const predictionCheckpoints = Array.isArray(data.prediction_checkpoints)
+                ? [...data.prediction_checkpoints].sort((a, b) => Number(a.observation_window_s || 0) - Number(b.observation_window_s || 0))
+                : [];
+            const predictionEnabled = window.BUILD_PROCESS_WATCHER_CONFIG?.predictiveReliability === true || predictionCheckpoints.length > 0;
+            const readyPredictionCount = predictionCheckpoints.filter(checkpoint => checkpoint.status === 'ready').length;
+            const latestReadyRisk = [...predictionCheckpoints].reverse().find(checkpoint => checkpoint.status === 'ready')?.risk_level;
+            const renderPredictionCard = (checkpoint) => {
+                const status = checkpoint.status || 'unknown';
+                const riskLevel = checkpoint.risk_level || 'unknown';
+                const providerBits = [];
+                if (checkpoint.provider_id) providerBits.push(`<div><span>Provider</span><strong>${escapeHtml(checkpoint.provider_id)}</strong></div>`);
+                if (checkpoint.model_version) providerBits.push(`<div><span>Model</span><strong>${escapeHtml(checkpoint.model_version)}</strong></div>`);
+                const detailsHtml = providerBits.length
+                    ? `<details class="prediction-details"><summary>Details</summary><div class="prediction-details-body">${providerBits.join('')}</div></details>`
+                    : '';
+                const signalHtml = Array.isArray(checkpoint.signals) && checkpoint.signals.length
+                    ? `<div class="prediction-signals">${checkpoint.signals.slice(0, 4).map(signal => `<span>${escapeHtml(signal)}</span>`).join('')}</div>`
+                    : '';
+                const messageHtml = checkpoint.message && (status === 'error' || status === 'skipped')
+                    ? `<p class="prediction-message">${escapeHtml(checkpoint.message)}</p>`
+                    : '';
+                return `
+                    <article class="prediction-card ${predictionRiskClass(riskLevel)} status-${predictionStatusClass(status)}">
+                        <div class="prediction-card-top">
+                            <strong>${escapeHtml(String(checkpoint.observation_window_s || 'N/A'))}s</strong>
+                            <span class="prediction-status">${escapeHtml(status)}</span>
+                        </div>
+                        <div class="prediction-risk">
+                            <span class="prediction-risk-level">${escapeHtml(riskLevel)}</span>
+                            ${Number.isFinite(Number(checkpoint.risk_score))
+                                ? `<span class="prediction-risk-score">score ${escapeHtml(formatRiskScore(checkpoint.risk_score))}</span>`
+                                : ''}
+                        </div>
+                        <div class="prediction-metrics">
+                            <div><span>Confidence</span><strong>${escapeHtml(checkpoint.confidence || 'N/A')}</strong></div>
+                            <div><span>Peak RSS</span><strong>${formatPredictionValue(checkpoint.predicted_peak_rss_mb, 'MB')}</strong></div>
+                            <div><span>Duration</span><strong>${formatPredictionValue(checkpoint.predicted_duration_s, 's')}</strong></div>
+                        </div>
+                        ${signalHtml}
+                        ${messageHtml}
+                        ${detailsHtml}
+                    </article>
+                `;
+            };
+            const predictionTabHtml = predictionCheckpoints.length ? `
+                <section class="prediction-panel prediction-tab-panel" aria-label="Prediction checkpoints">
+                    <div class="prediction-panel-head">
+                        <div>
+                            <span class="bpw-panel-badge">Predictions</span>
+                            <h2>Checkpoint Windows</h2>
+                        </div>
+                        <div class="prediction-panel-meta">${readyPredictionCount}/${predictionCheckpoints.length} ready</div>
+                    </div>
+                    <div class="prediction-grid prediction-timeline">
+                        ${predictionCheckpoints.map(renderPredictionCard).join('')}
+                    </div>
+                </section>
+            ` : `
+                <section class="prediction-empty" aria-label="Prediction checkpoints">
+                    <span class="bpw-panel-badge">Predictions</span>
+                    <h2>No prediction checkpoints</h2>
+                    <p>${predictionEnabled
+                        ? 'Checkpoints will appear here as observation windows complete.'
+                        : 'This run has no prediction_checkpoints. Legacy runs and deployments without predictive reliability omit this data.'}</p>
+                </section>
+            `;
+            const predictionPreviewHtml = predictionCheckpoints.length ? `
+                <section class="prediction-preview" aria-label="Prediction preview">
+                    <div class="prediction-preview-main">
+                        <span class="bpw-panel-badge">Predictions</span>
+                        <strong>${predictionCheckpoints.length} checkpoint${predictionCheckpoints.length === 1 ? '' : 's'}</strong>
+                        <span>${readyPredictionCount} ready${latestReadyRisk ? ` · latest risk ${escapeHtml(latestReadyRisk)}` : ''}</span>
+                    </div>
+                    <button type="button" class="btn secondary" data-run-tab="predictions">Open Predictions</button>
+                </section>
+            ` : '';
+
             // Render process info section
             let processInfoHtml = '';
             if (Object.keys(processInfo).length > 0) {
-                processInfoHtml = '<div class="process-info-section">';
-                processInfoHtml += '<h2>Process Information</h2>';
-                for (const [pid, info] of Object.entries(processInfo)) {
+                const formatMetricMb = (value) => value > 0 ? `${value.toFixed(value >= 1000 ? 0 : 1)} MB` : 'N/A';
+                const formatMetricSeconds = (value) => value > 0 ? `${value.toFixed(value >= 10 ? 1 : 3)} s` : 'N/A';
+                const processEntries = Object.entries(processInfo).map(([pid, info]) => {
                     const vmFlags = info.vm_flags || [];
-                    const metrics = processMetrics[pid] || { maxRss: 0, maxHeap: 0, totalGCTime: 0 };
-                    const maxHeapGiB = getMaxHeapGiB(vmFlags);
-                    processInfoHtml += '<div class="process-info-card">';
-                    processInfoHtml += `<h3>${info.name || 'Unknown'}${maxHeapGiB ? ` <span style="font-weight: 500; color: #475569; font-size: 0.95rem;">(Heap Max: ${maxHeapGiB} GiB)</span>` : ''}</h3>`;
-                    processInfoHtml += `<div class="process-meta">PID: ${pid}</div>`;
-                    
-                    // Add metrics
-                    processInfoHtml += '<div style="margin: 1rem 0; padding: 0.75rem; background: #f0f9ff; border-radius: 0.5rem; border-left: 3px solid #2563eb;">';
-                    processInfoHtml += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 0.5rem;">';
-                    processInfoHtml += `<div><strong>Max RSS:</strong> ${metrics.maxRss > 0 ? metrics.maxRss.toFixed(1) + ' MB' : 'N/A'}</div>`;
-                    processInfoHtml += `<div><strong>Max Heap:</strong> ${metrics.maxHeap > 0 ? metrics.maxHeap.toFixed(1) + ' MB' : 'N/A'}</div>`;
-                    processInfoHtml += `<div><strong>Total GC Time:</strong> ${metrics.totalGCTime > 0 ? metrics.totalGCTime.toFixed(3) + ' s' : 'N/A'}</div>`;
-                    processInfoHtml += '</div>';
-                    processInfoHtml += '</div>';
-                    
-                    if (vmFlags.length > 0) {
-                        processInfoHtml += '<div><strong>VM Flags:</strong></div>';
-                        processInfoHtml += '<div class="vm-flags-list">';
-                        vmFlags.forEach(flag => {
-                            processInfoHtml += `<span class="vm-flag">${escapeHtml(flag)}</span>`;
-                        });
-                        processInfoHtml += '</div>';
-                    } else {
-                        processInfoHtml += '<div class="process-meta">No VM flags available</div>';
-                    }
-                    processInfoHtml += '</div>';
-                }
-                
-                // Add summary section for max RSS across all processes
+                    const metrics = processMetrics[pid] || { maxRss: 0, maxHeap: 0, totalGCTime: 0, durationSeconds: 0, sampleCount: 0 };
+                    return {
+                        pid,
+                        info,
+                        vmFlags,
+                        metrics,
+                        maxHeapGiB: getMaxHeapGiB(vmFlags)
+                    };
+                });
+                const peakRssPid = processEntries.reduce((best, entry) => !best || entry.metrics.maxRss > best.metrics.maxRss ? entry : best, null)?.pid;
+                const peakGcPid = processEntries.reduce((best, entry) => !best || entry.metrics.totalGCTime > best.metrics.totalGCTime ? entry : best, null)?.pid;
+                const longestPid = processEntries.reduce((best, entry) => !best || entry.metrics.durationSeconds > best.metrics.durationSeconds ? entry : best, null)?.pid;
+                const groups = {};
+                processEntries.forEach((entry) => {
+                    const name = entry.info.name || 'Unknown';
+                    if (!groups[name]) groups[name] = [];
+                    groups[name].push(entry);
+                });
+
+                processInfoHtml = '<div class="process-info-section">';
+                processInfoHtml += '<div class="process-info-head">';
+                processInfoHtml += '<div><h2>Process Information</h2><p>Compare JVM processes first; expand details only when you need flags or runtime metadata.</p></div>';
                 if (maxRssAllProcesses > 0) {
-                    processInfoHtml += '<div class="process-info-card" style="background: #fef3c7; border-left: 3px solid #f59e0b;">';
-                    processInfoHtml += '<h3>Overall Summary</h3>';
-                    processInfoHtml += `<div style="font-size: 1.125rem; font-weight: 600; color: #92400e;">Max RSS (All Processes): ${maxRssAllProcesses.toFixed(1)} MB</div>`;
-                    processInfoHtml += '</div>';
+                    processInfoHtml += `<div class="process-info-total"><span>All processes peak</span><strong>${formatMetricMb(maxRssAllProcesses)}</strong></div>`;
                 }
-                
+                processInfoHtml += '</div>';
+                processInfoHtml += '<div class="process-groups">';
+                Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)).forEach(([name, entries]) => {
+                    processInfoHtml += '<section class="process-group">';
+                    processInfoHtml += `<div class="process-group-title"><h3>${escapeHtml(name)}</h3><span>${entries.length} PID${entries.length === 1 ? '' : 's'}</span></div>`;
+                    entries.sort((a, b) => b.metrics.maxRss - a.metrics.maxRss).forEach(({ pid, info, vmFlags, metrics, maxHeapGiB }) => {
+                        const badges = [];
+                        if (pid === peakRssPid && metrics.maxRss > 0) badges.push('Peak RSS contributor');
+                        if (pid === peakGcPid && metrics.totalGCTime > 0) badges.push('Most GC time');
+                        if (pid === longestPid && metrics.durationSeconds > 0) badges.push('Longest lived');
+                        if (metrics.finalCompiledMethods !== null || metrics.finalJITTimeMs !== null) badges.push('JIT data');
+                        if (metrics.finalClassesLoaded !== null) badges.push('Class data');
+
+                        processInfoHtml += '<article class="process-info-card">';
+                        processInfoHtml += '<div class="process-card-main">';
+                        processInfoHtml += '<div class="process-card-title">';
+                        processInfoHtml += `<strong>PID ${escapeHtml(pid)}</strong>`;
+                        if (maxHeapGiB) processInfoHtml += `<span>Heap max ${maxHeapGiB} GiB</span>`;
+                        processInfoHtml += '</div>';
+                        if (badges.length) {
+                            processInfoHtml += '<div class="process-badges">';
+                            badges.forEach((badge) => {
+                                processInfoHtml += `<span>${badge}</span>`;
+                            });
+                            processInfoHtml += '</div>';
+                        }
+                        processInfoHtml += '</div>';
+
+                        processInfoHtml += '<div class="process-metric-grid">';
+                        processInfoHtml += `<div class="process-metric"><strong>Max RSS</strong><span>${formatMetricMb(metrics.maxRss)}</span></div>`;
+                        processInfoHtml += `<div class="process-metric"><strong>Max Heap</strong><span>${formatMetricMb(metrics.maxHeap)}</span></div>`;
+                        processInfoHtml += `<div class="process-metric"><strong>GC Time</strong><span>${formatMetricSeconds(metrics.totalGCTime)}</span></div>`;
+                        processInfoHtml += `<div class="process-metric"><strong>Duration</strong><span>${metrics.durationSeconds > 0 ? formatDur(Math.round(metrics.durationSeconds)) : 'N/A'}</span></div>`;
+                        processInfoHtml += `<div class="process-metric"><strong>Compiled</strong><span>${metrics.finalCompiledMethods ?? 'N/A'}</span></div>`;
+                        processInfoHtml += `<div class="process-metric"><strong>Classes</strong><span>${metrics.finalClassesLoaded ?? 'N/A'}</span></div>`;
+                        processInfoHtml += '</div>';
+
+                        processInfoHtml += '<details class="process-details">';
+                        processInfoHtml += '<summary>JVM details</summary>';
+                        processInfoHtml += '<div class="process-detail-grid">';
+                        processInfoHtml += `<div><strong>Samples</strong><span>${metrics.sampleCount || 0}</span></div>`;
+                        processInfoHtml += `<div><strong>JIT time</strong><span>${metrics.finalJITTimeMs !== null ? formatMetricSeconds(metrics.finalJITTimeMs / 1000) : 'N/A'}</span></div>`;
+                        processInfoHtml += `<div><strong>Process name</strong><span>${escapeHtml(info.name || 'Unknown')}</span></div>`;
+                        processInfoHtml += '</div>';
+                        if (vmFlags.length > 0) {
+                            processInfoHtml += '<div class="vm-flags-list">';
+                            vmFlags.forEach(flag => {
+                                processInfoHtml += `<span class="vm-flag">${escapeHtml(flag)}</span>`;
+                            });
+                            processInfoHtml += '</div>';
+                        } else {
+                            processInfoHtml += '<div class="process-meta">No VM flags available</div>';
+                        }
+                        processInfoHtml += '</details>';
+                        processInfoHtml += '</article>';
+                    });
+                    processInfoHtml += '</section>';
+                });
+                processInfoHtml += '</div>';
                 processInfoHtml += '</div>';
             }
             
             const processCount = new Set(samples.map(s => `${s.Name}|${s.PID}`)).size;
             const elapsedTimes = samples.map(s => s.ElapsedTime || 0).filter(t => t > 0);
             const durationSec = elapsedTimes.length >= 2 ? Math.max(...elapsedTimes) - Math.min(...elapsedTimes) : (elapsedTimes[0] || 0);
-            const formatDur = (s) => s < 60 ? s + 's' : (Math.floor(s / 60) + 'm' + (s % 60 ? ' ' + Math.round(s % 60) + 's' : ''));
+            const formatMb = (value) => value > 0 ? `${value.toFixed(value >= 1000 ? 0 : 1)} MB` : 'N/A';
+            const sampleRate = durationSec > 0 && samples.length > 0 ? (samples.length / Math.max(durationSec, 1)) : 0;
+            const pressure = maxRssAllProcesses > 0 && maxHeapAllProcesses > 0
+                ? Math.min(999, (maxHeapAllProcesses / maxRssAllProcesses) * 100)
+                : 0;
 
             document.getElementById('content').innerHTML = `
                 <div class="run-header-bar">
@@ -682,23 +908,106 @@
                         ${maxRssAllProcesses > 0 ? `<span class="run-stat">${maxRssAllProcesses.toFixed(0)} MB peak</span>` : ''}
                         ${data.updated_at ? `<span class="run-stat muted">${new Date(data.updated_at).toLocaleString()}</span>` : ''}
                     </div>
-                    ${!isFinished ? `
-                        <div class="run-header-refresh">
-                            <label>Refresh</label>
-                            <select id="refreshInterval" onchange="setRefreshInterval(parseInt(this.value))">
-                                <option value="5" ${refreshInterval === 5 ? 'selected' : ''}>5s</option>
-                                <option value="10" ${refreshInterval === 10 ? 'selected' : ''}>10s</option>
-                                <option value="30" ${refreshInterval === 30 ? 'selected' : ''}>30s</option>
-                                <option value="60" ${refreshInterval === 60 ? 'selected' : ''}>1m</option>
-                                <option value="120" ${refreshInterval === 120 ? 'selected' : ''}>2m</option>
-                                <option value="300" ${refreshInterval === 300 ? 'selected' : ''}>5m</option>
-                            </select>
-                        </div>
-                    ` : ''}
+                    <div class="run-header-actions">
+                        <button type="button" class="btn secondary bpw-layout-toggle" data-bpw-layout-toggle id="btn-layout-toggle">Experiment layout</button>
+                        ${!isFinished ? `
+                            <div class="run-header-refresh">
+                                <label>Refresh</label>
+                                <select id="refreshInterval" onchange="setRefreshInterval(parseInt(this.value))">
+                                    <option value="5" ${refreshInterval === 5 ? 'selected' : ''}>5s</option>
+                                    <option value="10" ${refreshInterval === 10 ? 'selected' : ''}>10s</option>
+                                    <option value="30" ${refreshInterval === 30 ? 'selected' : ''}>30s</option>
+                                    <option value="60" ${refreshInterval === 60 ? 'selected' : ''}>1m</option>
+                                    <option value="120" ${refreshInterval === 120 ? 'selected' : ''}>2m</option>
+                                    <option value="300" ${refreshInterval === 300 ? 'selected' : ''}>5m</option>
+                                </select>
+                            </div>
+                        ` : ''}
+                    </div>
                 </div>
+
+                <div class="run-dashboard-tabs" role="tablist" aria-label="Run dashboard views">
+                    <button type="button" class="run-dashboard-tab" role="tab" id="run-tab-dashboard" data-run-tab="dashboard" aria-controls="run-panel-dashboard">Dashboard</button>
+                    <button type="button" class="run-dashboard-tab" role="tab" id="run-tab-predictions" data-run-tab="predictions" aria-controls="run-panel-predictions">Predictions</button>
+                </div>
+
+                <div id="run-panel-dashboard" class="run-dashboard-panel" role="tabpanel" aria-labelledby="run-tab-dashboard">
+                <div class="run-kpi-strip">
+                    <div class="run-kpi">
+                        <div class="run-kpi-label">Peak RSS</div>
+                        <div class="run-kpi-value">${formatMb(maxRssAllProcesses)}</div>
+                        <div class="run-kpi-note">Total memory across active JVMs</div>
+                    </div>
+                    <div class="run-kpi">
+                        <div class="run-kpi-label">Peak Heap</div>
+                        <div class="run-kpi-value">${formatMb(maxHeapAllProcesses)}</div>
+                        <div class="run-kpi-note">${pressure > 0 ? `${pressure.toFixed(0)}% of peak RSS` : 'Heap signal unavailable'}</div>
+                    </div>
+                    <div class="run-kpi">
+                        <div class="run-kpi-label">GC Time</div>
+                        <div class="run-kpi-value">${maxGcTimeAllProcesses > 0 ? `${maxGcTimeAllProcesses.toFixed(2)} s` : 'N/A'}</div>
+                        <div class="run-kpi-note">Highest cumulative process value</div>
+                    </div>
+                    <div class="run-kpi">
+                        <div class="run-kpi-label">Sample Density</div>
+                        <div class="run-kpi-value">${sampleRate > 0 ? `${sampleRate.toFixed(2)}/s` : 'N/A'}</div>
+                        <div class="run-kpi-note">${samples.length} samples over ${durationSec > 0 ? formatDur(durationSec) : 'the run'}</div>
+                    </div>
+                </div>
+
+                ${predictionPreviewHtml}
 
                 <!-- Compare runs hidden until ready -->
 
+                <div id="bpw-workspace-deck" class="bpw-workspace-deck" hidden aria-label="Workspace layout"></div>
+
+                ${isFinished === true && samples.length ? `
+                <div id="bpw-unified-replay" class="bpw-unified-replay" hidden>
+                    <div class="bpw-unified-label">Unified replay (all charts)</div>
+                    <div class="replay-controls" id="bpw-unified-replay-controls">
+                        <div class="buttons">
+                            <button class="btn" id="bpw-unified-play" type="button">Play</button>
+                            <button class="btn secondary" id="bpw-unified-pause" type="button">Pause</button>
+                            <button class="btn secondary" id="bpw-unified-reset" type="button">Reset</button>
+                        </div>
+                        <div class="meta" id="bpw-unified-meta">Frame 0 / 0</div>
+                        <div class="timeline">
+                            <input type="range" id="bpw-unified-timeline" min="0" max="0" value="0">
+                            <div class="meta" id="bpw-unified-time-label">Elapsed: 0s</div>
+                            <div class="meta">
+                                Speed:
+                                <select id="bpw-unified-speed">
+                                    <option value="5">5x</option>
+                                    <option value="10">10x</option>
+                                    <option value="15" selected>15x</option>
+                                    <option value="20">20x</option>
+                                    <option value="25">25x</option>
+                                    <option value="30">30x</option>
+                                    <option value="35">35x</option>
+                                    <option value="40">40x</option>
+                                    <option value="45">45x</option>
+                                    <option value="50">50x</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+
+                <div id="bpw-chart-studio" class="bpw-chart-studio" hidden aria-label="Chart overlay studio"></div>
+                <div id="bpw-build-story" class="bpw-build-story" hidden aria-label="Build story timeline"></div>
+
+                <div id="bpw-charts-grid" class="bpw-charts-grid">
+                <section class="bpw-chart-panel" data-bpw-panel="memory" id="section-memory">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">Memory</span>
+                            <h3>Memory Usage Over Time</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="memory" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
                 <div class="chart-container">
                     <div class="downloads-toolbar">
                         <button class="btn" id="btn-download-png">Download PNG</button>
@@ -715,11 +1024,11 @@
                             </div>
                             <div class="meta" id="rss-replay-meta">Frame 0 / 0</div>
                             <div class="timeline">
-                                <input type="range" id="rss-replay-timeline" min="0" max="0" value="0">
+                                <input type="range" id="rss-replay-timeline" aria-label="Memory replay timeline" min="0" max="0" value="0">
                                 <div class="meta" id="rss-replay-time-label">Elapsed: 0s</div>
                                 <div class="meta">
                                     Speed:
-                                    <select id="rss-replay-speed">
+                                    <select id="rss-replay-speed" aria-label="Memory replay speed">
                                         <option value="5">5x</option>
                                         <option value="10">10x</option>
                                         <option value="15" selected>15x</option>
@@ -740,13 +1049,25 @@
                             <label><input type="checkbox" id="filter-heap" checked> Heap</label>
                         </div>
                     ` : ''}
-                    <h3>Memory Usage Over Time</h3>
                     <div class="chart-wrapper">
                         <div id="chart" style="width: 100%; height: 500px;"></div>
                     </div>
                 </div>
+                    </div>
+                </div>
+                </section>
 
                 ${hasGCData(samples) ? `
+                <section class="bpw-chart-panel" data-bpw-panel="gc" id="section-gc">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">GC</span>
+                            <h3>Garbage Collection Time</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="gc" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
                 <div class="chart-container">
                     <div class="downloads-toolbar">
                         <button class="btn" id="btn-download-gc-png">Download GC PNG</button>
@@ -761,11 +1082,11 @@
                             </div>
                             <div class="meta" id="gc-replay-meta">Frame 0 / 0</div>
                             <div class="timeline">
-                                <input type="range" id="gc-replay-timeline" min="0" max="0" value="0">
+                                <input type="range" id="gc-replay-timeline" aria-label="GC replay timeline" min="0" max="0" value="0">
                                 <div class="meta" id="gc-replay-time-label">Elapsed: 0s</div>
                                 <div class="meta">
                                     Speed:
-                                    <select id="gc-replay-speed">
+                                    <select id="gc-replay-speed" aria-label="GC replay speed">
                                         <option value="5">5x</option>
                                         <option value="10">10x</option>
                                         <option value="15" selected>15x</option>
@@ -781,53 +1102,149 @@
                             </div>
                         </div>
                     ` : ''}
-                    <h3>Garbage Collection Time Over Time</h3>
                     <div class="chart-wrapper">
                         <div id="gc-chart" style="width: 100%; height: 500px;"></div>
                     </div>
                 </div>
-                ` : ''}
-                ${shouldShowRssHeapRatioChart(samples) ? `
-                <div class="chart-container">
-                    <div class="downloads-toolbar">
-                        <button class="btn" id="btn-download-rss-heap-png">Download Heap/RSS PNG</button>
-                        <button class="btn" id="btn-download-rss-heap-svg">Download Heap/RSS SVG</button>
                     </div>
-                    ${isFinished === true ? `
-                        <div class="replay-controls" id="ratio-replay-controls">
+                </div>
+                </section>
+                ` : ''}
+                ${(hasJITData(samples) || hasClassLoadingData(samples)) ? `<div class="bpw-runtime-stage">` : ''}
+                ${hasJITData(samples) ? `
+                <section class="bpw-chart-panel" data-bpw-panel="jit-time" id="section-jit-time">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">JIT</span>
+                            <h3>Cumulative Compilation Time</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="jit-time" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
+                        <div class="downloads-toolbar">
+                            <button class="btn" id="btn-download-jit-png">Download JIT PNG</button>
+                            <button class="btn" id="btn-download-jit-svg">Download JIT SVG</button>
+                        </div>
+                        ${isFinished === true ? `
+                        <div class="replay-controls" id="jit-replay-controls">
                             <div class="buttons">
-                                <button class="btn" id="btn-ratio-replay-play">Play</button>
-                                <button class="btn secondary" id="btn-ratio-replay-pause">Pause</button>
-                                <button class="btn secondary" id="btn-ratio-replay-reset">Reset</button>
+                                <button class="btn" id="btn-jit-replay-play">Play</button>
+                                <button class="btn secondary" id="btn-jit-replay-pause">Pause</button>
+                                <button class="btn secondary" id="btn-jit-replay-reset">Reset</button>
                             </div>
-                            <div class="meta" id="ratio-replay-meta">Frame 0 / 0</div>
+                            <div class="meta" id="jit-replay-meta">Frame 0 / 0</div>
                             <div class="timeline">
-                                <input type="range" id="ratio-replay-timeline" min="0" max="0" value="0">
-                                <div class="meta" id="ratio-replay-time-label">Elapsed: 0s</div>
+                                <input type="range" id="jit-replay-timeline" aria-label="JIT replay timeline" min="0" max="0" value="0">
+                                <div class="meta" id="jit-replay-time-label">Elapsed: 0s</div>
                                 <div class="meta">
                                     Speed:
-                                    <select id="ratio-replay-speed">
+                                    <select id="jit-replay-speed" aria-label="JIT replay speed">
                                         <option value="5">5x</option>
                                         <option value="10">10x</option>
                                         <option value="15" selected>15x</option>
                                         <option value="20">20x</option>
                                         <option value="25">25x</option>
                                         <option value="30">30x</option>
-                                        <option value="35">35x</option>
-                                        <option value="40">40x</option>
-                                        <option value="45">45x</option>
-                                        <option value="50">50x</option>
                                     </select>
                                 </div>
                             </div>
                         </div>
-                    ` : ''}
-                    <h3>Heap/RSS Ratio Over Time</h3>
-                    <div class="chart-wrapper">
-                        <div id="rss-heap-chart" style="width: 100%; height: 500px;"></div>
+                        ` : ''}
+                        <div class="chart-container">
+                            <div class="chart-wrapper">
+                                <div id="jit-time-chart" class="bpw-chart-plot" style="width:100%;height:450px"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-                ` : ''}
+                </section>
+                <section class="bpw-chart-panel" data-bpw-panel="jit-rate" id="section-jit-rate">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">JIT</span>
+                            <h3>Compilation Activity</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="jit-rate" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
+                        <div class="chart-container">
+                            <div class="chart-wrapper">
+                                <div id="jit-rate-chart" class="bpw-chart-plot" style="width:100%;height:450px"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </section>` : ''}
+                ${hasClassLoadingData(samples) ? `
+                <section class="bpw-chart-panel" data-bpw-panel="classes-loaded" id="section-classes-loaded">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">Classes</span>
+                            <h3>Cumulative Classes Loaded</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="classes-loaded" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
+                        <div class="downloads-toolbar">
+                            <button class="btn" id="btn-download-classes-png">Download Classes PNG</button>
+                            <button class="btn" id="btn-download-classes-svg">Download Classes SVG</button>
+                        </div>
+                        ${isFinished === true ? `
+                        <div class="replay-controls" id="classes-replay-controls">
+                            <div class="buttons">
+                                <button class="btn" id="btn-classes-replay-play">Play</button>
+                                <button class="btn secondary" id="btn-classes-replay-pause">Pause</button>
+                                <button class="btn secondary" id="btn-classes-replay-reset">Reset</button>
+                            </div>
+                            <div class="meta" id="classes-replay-meta">Frame 0 / 0</div>
+                            <div class="timeline">
+                                <input type="range" id="classes-replay-timeline" aria-label="Class loading replay timeline" min="0" max="0" value="0">
+                                <div class="meta" id="classes-replay-time-label">Elapsed: 0s</div>
+                                <div class="meta">
+                                    Speed:
+                                    <select id="classes-replay-speed" aria-label="Class loading replay speed">
+                                        <option value="5">5x</option>
+                                        <option value="10">10x</option>
+                                        <option value="15" selected>15x</option>
+                                        <option value="20">20x</option>
+                                        <option value="25">25x</option>
+                                        <option value="30">30x</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        ` : ''}
+                        <div class="chart-container">
+                            <div class="chart-wrapper">
+                                <div id="classes-loaded-chart" class="bpw-chart-plot" style="width:100%;height:450px"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </section>
+                <section class="bpw-chart-panel" data-bpw-panel="class-rate" id="section-class-rate">
+                <div class="bpw-panel-card">
+                    <div class="bpw-panel-card-head">
+                        <div>
+                            <span class="bpw-panel-badge">Classes</span>
+                            <h3>Class Loading Activity</h3>
+                        </div>
+                        <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="class-rate" title="Expand this panel">Expand</button>
+                    </div>
+                    <div class="bpw-panel-card-body">
+                        <div class="chart-container">
+                            <div class="chart-wrapper">
+                                <div id="class-rate-chart" class="bpw-chart-plot" style="width:100%;height:450px"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </section>` : ''}
+                ${(hasJITData(samples) || hasClassLoadingData(samples)) ? `</div>` : ''}
+                </div>
 
                 ${processInfoHtml}
 
@@ -841,6 +1258,11 @@
                 ` : ''}
 
                 <div id="compare-section" class="compare-section" style="display: none;"></div>
+                </div>
+
+                <div id="run-panel-predictions" class="run-dashboard-panel" role="tabpanel" aria-labelledby="run-tab-predictions" hidden>
+                    ${predictionTabHtml}
+                </div>
             `;
 
             if (samples.length > 0) {
@@ -849,12 +1271,24 @@
                 if (hasGCData(samples)) {
                     renderGCChart(samples);
                 }
-                if (shouldShowRssHeapRatioChart(samples)) {
-                    renderRssHeapRatioChart(samples);
-                }
+                renderJvmCounterCharts(samples);
                 if (isFinished === true) {
                     setupCompareControls(samples);
                     initReplay(samples);
+                } else if (window.BpwChartStudio) {
+                    BpwChartStudio.init({
+                        samples,
+                        runId,
+                        useElapsedAxis: false
+                    });
+                }
+                if (isFinished !== true && window.BpwBuildStory) {
+                    BpwBuildStory.init({
+                        samples,
+                        runId,
+                        useElapsedAxis: false,
+                        initialFrame: samples.length - 1
+                    });
                 }
             }
 
@@ -865,8 +1299,10 @@
             const btnCsv = document.getElementById('btn-download-csv');
             const btnGcPng = document.getElementById('btn-download-gc-png');
             const btnGcSvg = document.getElementById('btn-download-gc-svg');
-            const btnRssHeapPng = document.getElementById('btn-download-rss-heap-png');
-            const btnRssHeapSvg = document.getElementById('btn-download-rss-heap-svg');
+            const btnJitPng = document.getElementById('btn-download-jit-png');
+            const btnJitSvg = document.getElementById('btn-download-jit-svg');
+            const btnClassesPng = document.getElementById('btn-download-classes-png');
+            const btnClassesSvg = document.getElementById('btn-download-classes-svg');
 
             if (btnPng) btnPng.onclick = () => downloadChart('png');
             if (btnSvg) btnSvg.onclick = () => downloadChart('svg');
@@ -874,8 +1310,26 @@
             if (btnCsv) btnCsv.onclick = () => downloadCsv(runId);
             if (btnGcPng) btnGcPng.onclick = () => downloadGCChart('png');
             if (btnGcSvg) btnGcSvg.onclick = () => downloadGCChart('svg');
-            if (btnRssHeapPng) btnRssHeapPng.onclick = () => downloadRssHeapRatioChart('png');
-            if (btnRssHeapSvg) btnRssHeapSvg.onclick = () => downloadRssHeapRatioChart('svg');
+            if (btnJitPng) btnJitPng.onclick = () => downloadRuntimeChart('jit-time-chart', 'jit', 'png');
+            if (btnJitSvg) btnJitSvg.onclick = () => downloadRuntimeChart('jit-time-chart', 'jit', 'svg');
+            if (btnClassesPng) btnClassesPng.onclick = () => downloadRuntimeChart('classes-loaded-chart', 'classes', 'png');
+            if (btnClassesSvg) btnClassesSvg.onclick = () => downloadRuntimeChart('classes-loaded-chart', 'classes', 'svg');
+
+            if (window.BpwExperimentLayout) {
+                if (typeof BpwExperimentLayout.initAfterRunRender === 'function') {
+                    BpwExperimentLayout.initAfterRunRender();
+                } else {
+                    BpwExperimentLayout.initToggleButtons?.();
+                    if (typeof BpwExperimentLayout.applyMode === 'function') {
+                        BpwExperimentLayout.applyMode(BpwExperimentLayout.getMode());
+                    }
+                    const initDeck = BpwExperimentLayout.initWorkspaceDeck || BpwExperimentLayout.initSectionNav;
+                    if (typeof initDeck === 'function') initDeck();
+                    BpwExperimentLayout.initPanelFocusButtons?.();
+                }
+            }
+
+            bindRunDashboardTabs();
         }
 
         function shouldShowRssHeapRatioChart(samples) {
@@ -986,48 +1440,8 @@
 
             // Total GC line intentionally omitted.
 
-            // Detect if mobile
-            const isMobile = window.innerWidth < 768;
-            
-            const layout = {
-                title: isMobile ? '' : 'Garbage Collection Time Over Time',
-                xaxis: { 
-                    title: 'Time',
-                    tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
-                    tickangle: isMobile ? -45 : 0
-                },
-                yaxis: { title: 'GC Time (s)' },
-                showlegend: true,
-                legend: { 
-                    x: isMobile ? 0.5 : 1.02, 
-                    y: isMobile ? -0.2 : 1,
-                    xanchor: isMobile ? 'center' : 'left',
-                    orientation: isMobile ? 'h' : 'v'
-                },
-                margin: { 
-                    l: isMobile ? 50 : 60, 
-                    r: isMobile ? 20 : 100, 
-                    t: isMobile ? 20 : 40, 
-                    b: isMobile ? 80 : 60 
-                },
-                font: {
-                    size: isMobile ? 10 : 12
-                }
-            };
-
-            const config = {
-                responsive: true,
-                displayModeBar: true,
-                displaylogo: false,
-                modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d', 'autoScale2d'],
-                toImageButtonOptions: {
-                    format: 'png',
-                    filename: `build-monitor-gc-${runId}`,
-                    height: isMobile ? 400 : 500,
-                    width: isMobile ? 800 : 1000,
-                    scale: 2
-                }
-            };
+            const layout = getGcLayout();
+            const config = getGcConfig();
 
             Plotly.newPlot('gc-chart', applyVisibilityToTraces('gc-chart', traces), layout, config);
             attachLegendVisibilityHandlers('gc-chart');
@@ -1077,48 +1491,8 @@
 
             // Total Heap/RSS ratio line intentionally omitted.
 
-            // Detect if mobile
-            const isMobile = window.innerWidth < 768;
-            
-            const layout = {
-                title: isMobile ? '' : 'Heap/RSS Ratio Over Time',
-                xaxis: { 
-                    title: 'Time',
-                    tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
-                    tickangle: isMobile ? -45 : 0
-                },
-                yaxis: { title: 'Heap/RSS Ratio' },
-                showlegend: true,
-                legend: { 
-                    x: isMobile ? 0.5 : 1.02, 
-                    y: isMobile ? -0.2 : 1,
-                    xanchor: isMobile ? 'center' : 'left',
-                    orientation: isMobile ? 'h' : 'v'
-                },
-                margin: { 
-                    l: isMobile ? 50 : 60, 
-                    r: isMobile ? 20 : 100, 
-                    t: isMobile ? 20 : 40, 
-                    b: isMobile ? 80 : 60 
-                },
-                font: {
-                    size: isMobile ? 10 : 12
-                }
-            };
-
-            const config = {
-                responsive: true,
-                displayModeBar: true,
-                displaylogo: false,
-                modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d', 'autoScale2d'],
-                toImageButtonOptions: {
-                    format: 'png',
-                    filename: `build-monitor-rss-heap-${runId}`,
-                    height: isMobile ? 400 : 500,
-                    width: isMobile ? 800 : 1000,
-                    scale: 2
-                }
-            };
+            const layout = getRatioLayout();
+            const config = getRatioConfig();
 
             Plotly.newPlot('rss-heap-chart', applyVisibilityToTraces('rss-heap-chart', traces), layout, config);
             attachLegendVisibilityHandlers('rss-heap-chart');
@@ -1130,6 +1504,10 @@
         }
 
         function initReplay(samples) {
+            if (window.BpwExperimentLayout) {
+                BpwExperimentLayout.clearReplayPanels();
+            }
+
             const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
             const processKeys = [...new Set(samples.map(s => `${s.Name}|${s.PID}`))];
             const elapsedByTimestamp = new Map();
@@ -1198,6 +1576,8 @@
                 };
             }
             const firstTotalRssIndex = chartTotalSeries.totalRss.findIndex(value => value !== null);
+            const counterReplayData = buildReplayData(samples, timestamps);
+            const counterElapsedSeconds = chartTimestamps.map(timestamp => Math.max(0, (timestamp - chartTimestamps[0]) / 1000));
 
             function buildMemoryTraces(frameIndex) {
                 const frameTimestamps = chartTimestamps.slice(0, frameIndex + 1).map(t => new Date(t));
@@ -1375,6 +1755,138 @@
                 renderFrame(initialFrame).then(() => {
                     attachLegendVisibilityHandlers(chartId, onLegendUpdate);
                 });
+
+                if (window.BpwExperimentLayout) {
+                    BpwExperimentLayout.registerReplayPanel({
+                        pause,
+                        renderFrame,
+                        getMaxFrame: () => chartTimestamps.length - 1
+                    });
+                }
+            }
+
+            function setupCounterReplayPanel(options) {
+                const { panelKey, controlsId, charts } = options;
+                const controls = document.getElementById(controlsId);
+                const availableCharts = charts.filter(chart => document.getElementById(chart.id));
+                if (!controls || !availableCharts.length) return;
+
+                if (!window.replayStops) {
+                    window.replayStops = {};
+                }
+                if (window.replayStops[panelKey]) {
+                    window.replayStops[panelKey]();
+                }
+
+                const timeline = document.getElementById(`${panelKey}-replay-timeline`);
+                const meta = document.getElementById(`${panelKey}-replay-meta`);
+                const timeLabel = document.getElementById(`${panelKey}-replay-time-label`);
+                const playBtn = document.getElementById(`btn-${panelKey}-replay-play`);
+                const pauseBtn = document.getElementById(`btn-${panelKey}-replay-pause`);
+                const resetBtn = document.getElementById(`btn-${panelKey}-replay-reset`);
+                const speedSelect = document.getElementById(`${panelKey}-replay-speed`);
+                if (!timeline || !meta || !timeLabel || !playBtn || !pauseBtn || !resetBtn || !speedSelect) return;
+
+                let isPlaying = false;
+                let playTimer = null;
+                let currentFrame = 0;
+                let speedMultiplier = Number(speedSelect.value) || 15;
+
+                timeline.max = String(Math.max(0, chartTimestamps.length - 1));
+
+                function updateUi(frameIndex) {
+                    timeline.value = String(frameIndex);
+                    meta.textContent = `Frame ${frameIndex + 1} / ${chartTimestamps.length}`;
+                    const timestamp = chartTimestamps[frameIndex];
+                    const elapsed = elapsedByTimestamp.get(timestamp);
+                    const timeText = new Date(timestamp).toLocaleTimeString();
+                    timeLabel.textContent = `Elapsed: ${elapsed}s | ${timeText}`;
+                }
+
+                function renderFrame(frameIndex) {
+                    currentFrame = frameIndex;
+                    updateUi(frameIndex);
+                    const tasks = availableCharts.map(chart => {
+                        const traces = buildMetricTraces(
+                            counterReplayData,
+                            chartTimestamps,
+                            frameIndex,
+                            chart.metric,
+                            {},
+                            counterElapsedSeconds
+                        );
+                        const layout = CompareShared.getCounterLayout(chart.title, chart.yTitle);
+                        layout.xaxis = { ...layout.xaxis, title: 'Elapsed (s)', tickformat: null, type: 'linear' };
+                        return Plotly.react(
+                            chart.id,
+                            applyVisibilityToTraces(chart.id, traces),
+                            layout,
+                            CompareShared.getCounterConfig(`build-monitor-${chart.metric}-${runId}`)
+                        );
+                    });
+                    return Promise.all(tasks);
+                }
+
+                function scheduleNext() {
+                    if (!isPlaying) return;
+                    if (currentFrame >= chartTimestamps.length - 1) {
+                        isPlaying = false;
+                        return;
+                    }
+                    const nextDelay = Math.max(
+                        16,
+                        (chartTimestamps[currentFrame + 1] - chartTimestamps[currentFrame]) / speedMultiplier
+                    );
+                    playTimer = setTimeout(() => {
+                        renderFrame(currentFrame + 1).then(scheduleNext);
+                    }, nextDelay);
+                }
+
+                function play() {
+                    if (isPlaying) return;
+                    isPlaying = true;
+                    scheduleNext();
+                }
+
+                function pause() {
+                    isPlaying = false;
+                    if (playTimer) {
+                        clearTimeout(playTimer);
+                        playTimer = null;
+                    }
+                }
+
+                window.replayStops[panelKey] = pause;
+
+                playBtn.addEventListener('click', play);
+                pauseBtn.addEventListener('click', pause);
+                resetBtn.addEventListener('click', () => {
+                    pause();
+                    renderFrame(0);
+                });
+                timeline.addEventListener('input', () => {
+                    pause();
+                    renderFrame(Number(timeline.value));
+                });
+                speedSelect.addEventListener('change', () => {
+                    const parsed = Number(speedSelect.value);
+                    if (!Number.isNaN(parsed) && parsed > 0) {
+                        speedMultiplier = parsed;
+                    }
+                });
+
+                const initialFrame = Math.max(0, chartTimestamps.length - 1);
+                renderFrame(initialFrame).then(() => {
+                    availableCharts.forEach(chart => attachLegendVisibilityHandlers(chart.id));
+                });
+
+                if (window.BpwExperimentLayout) {
+                    BpwExperimentLayout.registerReplayPanel({
+                        pause,
+                        renderFrame,
+                        getMaxFrame: () => chartTimestamps.length - 1
+                    });
+                }
             }
 
             setupReplayPanel({
@@ -1394,14 +1906,46 @@
                 layoutGetter: getGcLayout,
                 configGetter: getGcConfig
             });
-            setupReplayPanel({
-                panelKey: 'ratio',
-                chartId: 'rss-heap-chart',
-                controlsId: 'ratio-replay-controls',
-                buildTraces: buildRatioTraces,
-                layoutGetter: getRatioLayout,
-                configGetter: getRatioConfig
+            setupCounterReplayPanel({
+                panelKey: 'jit',
+                controlsId: 'jit-replay-controls',
+                charts: [
+                    { id: 'jit-time-chart', metric: 'jitTime', title: 'Cumulative JIT Compilation Time', yTitle: 'Compilation Time (s)' },
+                    { id: 'jit-rate-chart', metric: 'jitRate', title: 'JIT Compilation Activity', yTitle: 'Compiled Methods / s' }
+                ]
             });
+            setupCounterReplayPanel({
+                panelKey: 'classes',
+                controlsId: 'classes-replay-controls',
+                charts: [
+                    { id: 'classes-loaded-chart', metric: 'classesLoaded', title: 'Cumulative Classes Loaded', yTitle: 'Classes Loaded' },
+                    { id: 'class-rate-chart', metric: 'classRate', title: 'Class Loading Activity', yTitle: 'Classes / s' }
+                ]
+            });
+
+            if (window.BpwChartStudio) {
+                BpwChartStudio.init({
+                    samples,
+                    runId,
+                    useElapsedAxis: true,
+                    initialFrame: Math.max(0, chartTimestamps.length - 1)
+                });
+            }
+            if (window.BpwBuildStory) {
+                BpwBuildStory.init({
+                    samples,
+                    runId,
+                    useElapsedAxis: true,
+                    initialFrame: Math.max(0, chartTimestamps.length - 1)
+                });
+            }
+
+            if (window.BpwExperimentLayout) {
+                BpwExperimentLayout.initUnifiedReplay({
+                    timestamps: chartTimestamps,
+                    elapsedByTimestamp
+                });
+            }
         }
 
         function setupCompareControls(samples) {
@@ -2037,6 +2581,28 @@
             });
         }
 
+        function renderJvmCounterCharts(samples) {
+            if (!hasJITData(samples) && !hasClassLoadingData(samples)) return;
+            const timestamps = [...new Set(samples.map(s => s.Timestamp))].sort((a, b) => a - b);
+            const data = buildReplayData(samples, timestamps);
+            const frame = Math.max(0, data.timestamps.length - 1);
+            const charts = [
+                ['jit-time-chart', 'jitTime', 'Cumulative JIT Compilation Time', 'Compilation Time (s)'],
+                ['jit-rate-chart', 'jitRate', 'JIT Compilation Activity', 'Compiled Methods / s'],
+                ['classes-loaded-chart', 'classesLoaded', 'Cumulative Classes Loaded', 'Classes Loaded'],
+                ['class-rate-chart', 'classRate', 'Class Loading Activity', 'Classes / s']
+            ];
+            charts.forEach(([id, metric, title, yTitle]) => {
+                if (!document.getElementById(id)) return;
+                const traces = buildMetricTraces(data, data.timestamps, frame, metric, {});
+                Plotly.newPlot(id, applyVisibilityToTraces(id, traces), CompareShared.getCounterLayout(title, yTitle), CompareShared.getCounterConfig(`build-monitor-${metric}-${runId}`));
+                attachLegendVisibilityHandlers(id);
+            });
+            if (window.BpwExperimentLayout) {
+                BpwExperimentLayout.resizeCharts();
+            }
+        }
+
         async function downloadChart(format) {
             try {
                 const chart = document.getElementById('chart');
@@ -2085,6 +2651,30 @@
             }
         }
 
+        async function downloadRuntimeChart(chartId, metric, format) {
+            try {
+                const chart = document.getElementById(chartId);
+                const isMobile = window.innerWidth < 768;
+                const filename = `build-monitor-${metric}-${runId}`;
+                const opts = {
+                    format: format,
+                    filename: filename,
+                    height: isMobile ? 400 : 500,
+                    width: isMobile ? 800 : 1000,
+                    scale: 2
+                };
+                const url = await Plotly.toImage(chart, opts);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${filename}.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            } catch (e) {
+                console.error(`Failed to export ${metric} chart:`, e);
+            }
+        }
+
         async function downloadRssHeapRatioChart(format) {
             try {
                 const chart = document.getElementById('rss-heap-chart');
@@ -2115,10 +2705,10 @@
                 const samples = Array.isArray(data.samples) ? data.samples : [];
                 const processInfo = data.process_info || {};
                 const processSummary = CompareShared.buildProcessSummary(samples, processInfo);
-                const payload = {
+                const payload = CompareShared.compactReportData({
                     ...data,
                     process_summary: processSummary
-                };
+                });
                 const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -2138,9 +2728,7 @@
                 const samples = window.currentSamples || [];
                 if (!samples.length) return;
                 const hasGC = hasGCData(samples);
-                const header = hasGC ? 
-                    ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb','gc_time_s'] :
-                    ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb'];
+                const header = ['timestamp','elapsed_time','pid','name','rss_mb','heap_used_mb','heap_capacity_mb','gc_time_s','jit_compiled_methods','jit_failed_compilations','jit_invalidated_compilations','jit_compilation_time_ms','classes_loaded','classes_unloaded','class_load_time_ms'];
                 const rows = samples.map(s => {
                     const baseRow = [
                         s.Timestamp,
@@ -2151,10 +2739,8 @@
                         s.HeapUsed,
                         s.HeapCap
                     ];
-                    if (hasGC) {
-                        // Convert from milliseconds (stored in DB) to seconds (for display)
-                        baseRow.push(s.GCTime ? (s.GCTime / 1000).toFixed(3) : 0);
-                    }
+                    baseRow.push(s.GCTime !== null && s.GCTime !== undefined ? (s.GCTime / 1000).toFixed(3) : null);
+                    baseRow.push(s.JITCompiledMethods, s.JITFailedCompilations, s.JITInvalidatedCompilations, s.JITCompilationTimeMs, s.ClassesLoaded, s.ClassesUnloaded, s.ClassLoadTimeMs);
                     return baseRow;
                 });
                 const csv = [header.join(','), ...rows.map(r => r.map(escapeCsv).join(','))].join('\n');
@@ -2196,30 +2782,33 @@
             return CompareShared.getMemoryConfig(`build-monitor-${runId}`);
         }
 
-        function showNotFound(runId) {
-            document.getElementById('content').innerHTML = `
-                <div class="not-found">
-                    <h2>Run Not Found</h2>
-                    <p>The build run with ID <code>${runId}</code> could not be found.</p>
-                    <p>This might be because:</p>
-                    <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
-                        <li>The memory report has expired (available for 24 hours)</li>
-                        <li>The run ID is incorrect</li>
-                        <li>The build is still in progress</li>
-                    </ul>
-                    <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none;">Back to Home</a>
-                </div>
-            `;
-        }
+        function showUnavailableRun(reason) {
+            const unavailableCopy = reason === 'not-found'
+                ? {
+                    title: 'Run Unavailable',
+                    message: 'This run could not be found. The link may be incorrect, or the run may have expired.'
+                }
+                : reason === 'server'
+                    ? {
+                        title: 'Run Temporarily Unavailable',
+                        message: 'The service could not load this run right now. Please try again.'
+                    }
+                    : {
+                        title: 'Unable to Connect',
+                        message: 'Check your connection, then try loading this run again.'
+                    };
 
-        function showError(message) {
             document.getElementById('content').innerHTML = `
                 <div class="error">
-                    <h2>Error Loading Data</h2>
-                    <p>Failed to load run data: ${message}</p>
-                    <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none;">Back to Home</a>
+                    <h2>${unavailableCopy.title}</h2>
+                    <p>${unavailableCopy.message}</p>
+                    <div style="display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;">
+                        <button type="button" id="retry-run-load">Retry</button>
+                        <a href="https://process-watcher.web.app" style="color: #2563eb; text-decoration: none; align-self: center;">Back to Home</a>
+                    </div>
                 </div>
             `;
+            document.getElementById('retry-run-load').addEventListener('click', () => loadRunData(runId));
         }
     </script>
 

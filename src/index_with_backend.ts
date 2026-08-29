@@ -3,35 +3,67 @@ import * as exec from '@actions/exec';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import {
+  DEFAULT_LOG_FILE_NAME,
+  resolveActionRuntimePaths,
+  resolveMonitoringFeatureFlags,
+} from './monitoring_features';
 
 async function run() {
   try {
-    let backendUrl = process.env.BACKEND_URL || '';
-    const enableBackend = core.getInput('remote_monitoring') === 'true';
+    const requestedBackendUrl = process.env.BACKEND_URL || '';
+    const requestedFrontendUrl = process.env.FRONTEND_URL || '';
+    const remoteMonitoringRequested = core.getInput('remote_monitoring') === 'true';
     const runId = core.getInput('run_id') || `run-${Date.now()}`;
     const debugMode = core.getInput('debug') === 'true';
-    const logFileInput = core.getInput('log_file') || 'build_process_watcher.log';
+    const logFileInput = core.getInput('log_file') || DEFAULT_LOG_FILE_NAME;
     const workspaceDir = process.env.GITHUB_WORKSPACE;
-    let logFilePath = !path.isAbsolute(logFileInput) && workspaceDir
-      ? path.join(workspaceDir, logFileInput)
-      : logFileInput;
-    if (logFileInput === 'build_process_watcher.log' && fs.existsSync(logFilePath)) {
-      const logDir = path.dirname(logFilePath);
-      logFilePath = path.join(logDir, `build_process_watcher-${runId}.log`);
-      if (debugMode) {
-        core.info(`🧭 Log file already exists, using: ${logFilePath}`);
-      }
+    const runnerTempRoot = process.env.RUNNER_TEMP || os.tmpdir();
+    const { runnerTempDir, logFilePath, defaultLogFile } = resolveActionRuntimePaths({
+      runId,
+      logFileInput,
+      workspaceDir,
+      runnerTempRoot,
+      logFileExists: fs.existsSync,
+    });
+    fs.mkdirSync(runnerTempDir, { recursive: true });
+    if (
+      debugMode &&
+      defaultLogFile &&
+      path.basename(logFilePath) === `build_process_watcher-${runId}.log`
+    ) {
+      core.info(`🧭 Log file already exists, using: ${logFilePath}`);
     }
     const interval = core.getInput('interval') || '5';
     const disableSummaryOutput = core.getInput('disable_summary_output') === 'true';
+    const exportToBigqueryRequested = core.getInput('export_to_bigquery') === 'true';
+    const predictiveReliabilityRequested = core.getInput('predictive_reliability') === 'true';
 
-    // If backend is enabled but no URL provided, use the default Cloud Run URL
-    if (enableBackend && !backendUrl) {
-      // Default production backend URL
-      backendUrl = 'https://build-process-watcher-backend-685615422311.us-central1.run.app';
-      if (debugMode) {
-        core.info(`🔧 Backend enabled but no URL provided, using default URL: ${backendUrl}`);
-      }
+    const {
+      enableBackend,
+      backendUrl,
+      frontendUrl,
+      exportToBigquery,
+      predictiveReliability,
+    } = resolveMonitoringFeatureFlags({
+      remoteMonitoringRequested,
+      exportToBigqueryRequested,
+      predictiveReliabilityRequested,
+      backendUrl: requestedBackendUrl,
+      frontendUrl: requestedFrontendUrl,
+      runId,
+    });
+    const useBackend = enableBackend && !!backendUrl;
+
+    if (enableBackend && !requestedBackendUrl && debugMode) {
+      core.info(`🔧 Backend enabled but no URL provided, using default URL: ${backendUrl}`);
+    }
+
+    if (predictiveReliabilityRequested && debugMode) {
+      core.info(`🔮 predictive_reliability enables remote_monitoring and export_to_bigquery for this run`);
+    } else if (exportToBigqueryRequested && !useBackend && debugMode) {
+      core.info(`ℹ️  export_to_bigquery is ignored without remote_monitoring and a backend URL`);
     }
 
     // Show mode and essential info
@@ -43,28 +75,7 @@ async function run() {
       core.info(`🌐 Backend URL: ${backendUrl || 'Not provided'}`);
       core.info(`⚙️  Remote Monitoring: ${enableBackend}`);
       core.info(`🐛 Debug Mode: ${debugMode}`);
-    }
-
-    // Build frontend URL if backend is enabled (do this before exporting)
-    let frontendUrl = '';
-    if (enableBackend && backendUrl) {
-      // Use FRONTEND_URL env var (from secrets) or default
-      const explicitFrontendUrl = process.env.FRONTEND_URL || '';
-      
-      if (explicitFrontendUrl) {
-        // Use explicitly provided frontend URL (from env var or input)
-        if (explicitFrontendUrl.endsWith('/runs') || explicitFrontendUrl.endsWith('/runs/')) {
-          frontendUrl = `${explicitFrontendUrl}/${runId}`;
-        } else {
-          frontendUrl = `${explicitFrontendUrl}/runs/${runId}`;
-        }
-        
-      } else {
-        const baseFrontendUrl = 'https://process-watcher.web.app';
-        frontendUrl = `${baseFrontendUrl}/runs/${runId}`;
-      }
-      
-      if (debugMode) {
+      if (frontendUrl) {
         core.info(`🌐 Frontend URL: ${frontendUrl}`);
       }
     }
@@ -73,22 +84,18 @@ async function run() {
     core.exportVariable('ENABLE_BACKEND', enableBackend.toString());
     core.exportVariable('RUN_ID', runId);
     core.exportVariable('LOG_FILE', logFilePath);
+    core.exportVariable('BPW_LOG_FILE_DEFAULT', defaultLogFile.toString());
     core.exportVariable('DISABLE_SUMMARY_OUTPUT', disableSummaryOutput.toString());
+    core.exportVariable('EXPORT_TO_BIGQUERY', exportToBigquery ? 'true' : 'false');
+    core.exportVariable('PREDICTIVE_RELIABILITY', predictiveReliability ? 'true' : 'false');
     
     // Also write RUN_ID to a file as a backup for the post step
     // This ensures the post step can always find the RUN_ID even if env vars aren't available
     try {
-      const runIdFile = path.join(process.cwd(), '.build-process-watcher-run-id');
+      const runIdFile = path.join(runnerTempDir, '.build-process-watcher-run-id');
       fs.writeFileSync(runIdFile, runId, 'utf8');
       if (debugMode) {
         core.info(`💾 Saved RUN_ID to file: ${runIdFile}`);
-      }
-      if (workspaceDir) {
-        const workspaceRunIdFile = path.join(workspaceDir, '.build-process-watcher-run-id');
-        fs.writeFileSync(workspaceRunIdFile, runId, 'utf8');
-        if (debugMode) {
-          core.info(`💾 Saved RUN_ID to workspace file: ${workspaceRunIdFile}`);
-        }
       }
     } catch (error) {
       // Non-critical - env var export should be sufficient
@@ -98,13 +105,12 @@ async function run() {
     }
     if (frontendUrl || backendUrl) {
       try {
-        const baseDir = workspaceDir || process.cwd();
         if (backendUrl) {
-          fs.writeFileSync(path.join(baseDir, '.build-process-watcher-backend-url'), backendUrl, 'utf8');
+          fs.writeFileSync(path.join(runnerTempDir, '.build-process-watcher-backend-url'), backendUrl, 'utf8');
         }
         if (frontendUrl) {
           const baseFrontendUrl = frontendUrl.replace(/\/runs\/.*$/, '');
-          fs.writeFileSync(path.join(baseDir, '.build-process-watcher-frontend-url'), baseFrontendUrl, 'utf8');
+          fs.writeFileSync(path.join(runnerTempDir, '.build-process-watcher-frontend-url'), baseFrontendUrl, 'utf8');
         }
       } catch (error) {
         if (debugMode) {
@@ -118,6 +124,8 @@ async function run() {
     core.setOutput('backend_url', backendUrl || '');
     core.setOutput('remote_monitoring', enableBackend.toString());
     core.setOutput('frontend_url', frontendUrl);
+    core.setOutput('export_to_bigquery', exportToBigquery.toString());
+    core.setOutput('predictive_reliability', predictiveReliability.toString());
 
     // Always show the dashboard URL when remote monitoring is enabled (regardless of debug mode)
     if (enableBackend && frontendUrl) {
@@ -187,8 +195,11 @@ async function run() {
       ...process.env,
       RUN_ID: runId,
       LOG_FILE: logFilePath,
+      BPW_LOG_FILE_DEFAULT: defaultLogFile.toString(),
       DEBUG_MODE: debugMode.toString(),
       REMOTE_MONITORING: (enableBackend && backendUrl) ? 'true' : 'false',
+      EXPORT_TO_BIGQUERY: exportToBigquery ? 'true' : 'false',
+      PREDICTIVE_RELIABILITY: predictiveReliability ? 'true' : 'false',
       COLLECT_GC: 'true'
     };
 

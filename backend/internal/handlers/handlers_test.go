@@ -2,10 +2,24 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/cdsap/build-process-watcher/backend/internal/auth"
 	"github.com/cdsap/build-process-watcher/backend/internal/models"
+	"github.com/cdsap/build-process-watcher/backend/pkg/predictor"
 )
+
+func TestMain(m *testing.M) {
+	auth.Initialize()
+	os.Exit(m.Run())
+}
 
 func TestIngestHandler_RequestWithProcessInfo(t *testing.T) {
 	// Test that IngestRequest with ProcessInfo can be properly parsed
@@ -40,6 +54,23 @@ func TestIngestHandler_RequestWithProcessInfo(t *testing.T) {
 
 	if len(unmarshaled.ProcessInfo.VMFlags) != 2 {
 		t.Errorf("Expected 2 VM flags, got %d", len(unmarshaled.ProcessInfo.VMFlags))
+	}
+}
+
+func TestBoolQueryAcceptsExplicitTrueOnly(t *testing.T) {
+	request := httptest.NewRequest("POST", "/auth/run/run-1?predictive_reliability=true", nil)
+	if !boolQuery(request, "predictive_reliability") {
+		t.Fatal("expected predictive_reliability=true to be accepted")
+	}
+
+	request = httptest.NewRequest("POST", "/auth/run/run-1?predictive_reliability=false", nil)
+	if boolQuery(request, "predictive_reliability") {
+		t.Fatal("expected predictive_reliability=false to be rejected")
+	}
+
+	request = httptest.NewRequest("POST", "/auth/run/run-1?predictive_reliability=maybe", nil)
+	if boolQuery(request, "predictive_reliability") {
+		t.Fatal("expected invalid predictive_reliability value to be rejected")
 	}
 }
 
@@ -111,5 +142,141 @@ func TestRunResponse_WithoutProcessInfo(t *testing.T) {
 	// ProcessInfo can be nil when not present
 	if unmarshaled.ProcessInfo != nil && len(unmarshaled.ProcessInfo) > 0 {
 		t.Error("ProcessInfo should be nil or empty when not present")
+	}
+}
+
+func TestRunResponse_WithPredictionCheckpoints(t *testing.T) {
+	createdAt := time.Unix(123, 0).UTC()
+	response := models.RunResponse{
+		Samples: []models.Sample{},
+		PredictionCheckpoints: []models.PredictionCheckpoint{
+			{
+				ObservationWindowS: 180,
+				Status:             "ready",
+				RiskLevel:          "low",
+				Confidence:         "medium",
+				Signals:            []string{"stable memory"},
+				ProviderID:         "private",
+				ModelVersion:       "opaque-v1",
+				CreatedAt:          createdAt,
+			},
+		},
+		Finished: false,
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Failed to marshal RunResponse: %v", err)
+	}
+
+	var unmarshaled models.RunResponse
+	if err := json.Unmarshal(jsonData, &unmarshaled); err != nil {
+		t.Fatalf("Failed to unmarshal RunResponse: %v", err)
+	}
+
+	if len(unmarshaled.PredictionCheckpoints) != 1 {
+		t.Fatalf("Expected 1 prediction checkpoint, got %d", len(unmarshaled.PredictionCheckpoints))
+	}
+	if unmarshaled.PredictionCheckpoints[0].ObservationWindowS != 180 {
+		t.Fatalf("Prediction window = %d, want 180", unmarshaled.PredictionCheckpoints[0].ObservationWindowS)
+	}
+}
+
+func TestNewHandlersWithPredictorUsesInjectedFallbackClassifier(t *testing.T) {
+	h := NewHandlersWithPredictor(nil, nil, predictor.NoopProvider{}, nil, func(error) (string, string) {
+		return "no_data", "prediction data unavailable"
+	})
+	state, message := h.fallbackClassifier(errors.New("ignored"))
+	if state != "no_data" || message != "prediction data unavailable" {
+		t.Fatalf("classifier = (%q, %q), want injected mapping", state, message)
+	}
+}
+
+func TestNewHandlersWithPredictorDefaultsFallbackClassifier(t *testing.T) {
+	h := NewHandlersWithPredictor(nil, nil, nil, nil, nil)
+	err := fmt.Errorf("private stack: customer id 9: boom")
+	state, message := h.fallbackClassifier(err)
+	if state != "provider_error" || message != "prediction provider error" {
+		t.Fatalf("classifier = (%q, %q), want default public-safe mapping", state, message)
+	}
+	if strings.Contains(message, "customer id") || message == err.Error() {
+		t.Fatal("default fallback classifier leaked private diagnostic text")
+	}
+}
+
+func TestValidateRunBearerToken(t *testing.T) {
+	const runID = "run-bearer-auth-1"
+
+	validToken, _, err := auth.GenerateToken(runID)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+	otherToken, _, err := auth.GenerateToken("other-run")
+	if err != nil {
+		t.Fatalf("GenerateToken for other run failed: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		header     string
+		wantStatus int
+		wantMsg    string
+		wantOK     bool
+	}{
+		{
+			name:       "missing authorization header",
+			header:     "",
+			wantStatus: http.StatusUnauthorized,
+			wantMsg:    "Authorization header required",
+		},
+		{
+			name:       "invalid authorization header format",
+			header:     "Token " + validToken,
+			wantStatus: http.StatusUnauthorized,
+			wantMsg:    "Invalid authorization header format",
+		},
+		{
+			name:       "invalid token",
+			header:     "Bearer not-a-valid-token",
+			wantStatus: http.StatusUnauthorized,
+			wantMsg:    "Token validation failed",
+		},
+		{
+			name:       "mismatched run id",
+			header:     "Bearer " + otherToken,
+			wantStatus: http.StatusUnauthorized,
+			wantMsg:    "Token validation failed",
+		},
+		{
+			name:   "valid bearer token",
+			header: "Bearer " + validToken,
+			wantOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/ingest", nil)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
+
+			status, message, ok := validateRunBearerToken(req, runID)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v (status=%d message=%q)", ok, tt.wantOK, status, message)
+			}
+			if tt.wantOK {
+				if status != 0 || message != "" {
+					t.Fatalf("status/message = (%d, %q), want zero values on success", status, message)
+				}
+				return
+			}
+			if status != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", status, tt.wantStatus)
+			}
+			if message != tt.wantMsg {
+				t.Fatalf("message = %q, want %q", message, tt.wantMsg)
+			}
+		})
 	}
 }

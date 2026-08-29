@@ -2,6 +2,8 @@
     const {
         parseJsonText,
         hasGCData,
+        hasJITData,
+        hasClassLoadingData,
         buildReplayData,
         buildMetricTraces,
         applyVisibilityToTraces,
@@ -10,6 +12,8 @@
         getMemoryConfig,
         getGcLayout,
         getGcConfig,
+        getCounterLayout,
+        getCounterConfig,
         visibilityStore
     } = window.BpwCompareShared || {};
 
@@ -35,8 +39,36 @@
         const chartTimestamps = data.timestamps || timestamps;
         const elapsedSeconds = chartTimestamps.map(ts => Math.max(0, (ts - chartTimestamps[0]) / 1000));
         const showGC = hasGCData(samples);
+        const showJIT = hasJITData(samples);
+        const showClasses = hasClassLoadingData(samples);
 
         section.innerHTML = `
+            <div id="bpw-unified-replay" class="bpw-unified-replay" hidden>
+                <div class="bpw-unified-label">Unified replay (all charts)</div>
+                <div class="replay-controls" id="bpw-unified-replay-controls">
+                    <div class="buttons">
+                        <button class="btn" id="bpw-unified-play" type="button">Play</button>
+                        <button class="btn secondary" id="bpw-unified-pause" type="button">Pause</button>
+                        <button class="btn secondary" id="bpw-unified-reset" type="button">Reset</button>
+                    </div>
+                    <div class="meta" id="bpw-unified-meta">Frame 0 / 0</div>
+                    <div class="timeline">
+                        <input type="range" id="bpw-unified-timeline" aria-label="Replay position" min="0" max="0" value="0">
+                        <div class="meta" id="bpw-unified-time-label">Elapsed: 0s</div>
+                        <div class="meta">
+                            Speed:
+                            <select id="bpw-unified-speed" aria-label="Playback speed">
+                                <option value="15" selected>15x</option>
+                                <option value="25">25x</option>
+                                <option value="50">50x</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="bpw-workspace-deck" class="bpw-workspace-deck" hidden aria-label="Workspace layout"></div>
+            <div id="bpw-chart-studio" class="bpw-chart-studio" hidden aria-label="Chart overlay studio"></div>
+            <div id="bpw-build-story" class="bpw-build-story" hidden aria-label="Build story timeline"></div>
             <div class="replay-controls" id="single-replay-controls">
                 <div class="buttons">
                     <button class="btn" id="btn-single-play">Play</button>
@@ -45,11 +77,11 @@
                 </div>
                 <div class="meta" id="single-replay-meta">Frame 0 / 0</div>
                 <div class="timeline">
-                    <input type="range" id="single-replay-timeline" min="0" max="0" value="0">
+                    <input type="range" id="single-replay-timeline" aria-label="Replay position" min="0" max="0" value="0">
                     <div class="meta" id="single-replay-time-label">Elapsed: 0s</div>
                     <div class="meta">
                         Speed:
-                        <select id="single-replay-speed">
+                        <select id="single-replay-speed" aria-label="Playback speed">
                             <option value="5">5x</option>
                             <option value="10">10x</option>
                             <option value="15" selected>15x</option>
@@ -69,23 +101,134 @@
                 <label><input type="checkbox" id="filter-single-rss" checked> RSS</label>
                 <label><input type="checkbox" id="filter-single-heap" checked> Heap</label>
             </div>
+            <div id="bpw-charts-grid" class="bpw-charts-grid">
+            <section class="bpw-chart-panel" data-bpw-panel="memory" id="section-memory">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">Memory</span>
+                        <h4>Memory Usage Over Time</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="memory" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
             <div class="chart-container">
-                <h4>Memory Usage Over Time</h4>
                 <div class="chart-wrapper">
                     <div id="single-rss" style="width: 100%; height: 460px;"></div>
                 </div>
             </div>
+                </div>
+            </div>
+            </section>
             ${showGC ? `
+            <section class="bpw-chart-panel" data-bpw-panel="gc" id="section-gc">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">GC</span>
+                        <h4>Garbage Collection Time</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="gc" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
             <div class="chart-container">
-                <h4>Garbage Collection Time Over Time</h4>
                 <div class="chart-wrapper">
                     <div id="single-gc" style="width: 100%; height: 460px;"></div>
                 </div>
             </div>
+                </div>
+            </div>
+            </section>
             ` : ''}
+            ${(showJIT || showClasses) ? `<div class="bpw-runtime-stage">` : ''}
+            ${showJIT ? `
+            <section class="bpw-chart-panel" data-bpw-panel="jit-time" id="section-jit-time">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">JIT</span>
+                        <h4>Cumulative Compilation Time</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="jit-time" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
+                    <div class="chart-container">
+                        <div class="chart-wrapper">
+                            <div id="single-jit-time" class="bpw-chart-plot" style="width:100%;height:400px"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </section>
+            <section class="bpw-chart-panel" data-bpw-panel="jit-rate" id="section-jit-rate">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">JIT</span>
+                        <h4>Compilation Activity</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="jit-rate" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
+                    <div class="chart-container">
+                        <div class="chart-wrapper">
+                            <div id="single-jit-rate" class="bpw-chart-plot" style="width:100%;height:400px"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </section>` : ''}
+            ${showClasses ? `
+            <section class="bpw-chart-panel" data-bpw-panel="classes-loaded" id="section-classes-loaded">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">Classes</span>
+                        <h4>Cumulative Classes Loaded</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="classes-loaded" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
+                    <div class="chart-container">
+                        <div class="chart-wrapper">
+                            <div id="single-classes-loaded" class="bpw-chart-plot" style="width:100%;height:400px"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </section>
+            <section class="bpw-chart-panel" data-bpw-panel="class-rate" id="section-class-rate">
+            <div class="bpw-panel-card">
+                <div class="bpw-panel-card-head">
+                    <div>
+                        <span class="bpw-panel-badge">Classes</span>
+                        <h4>Class Loading Activity</h4>
+                    </div>
+                    <button type="button" class="bpw-panel-focus-btn" data-bpw-focus="class-rate" title="Expand this panel">Expand</button>
+                </div>
+                <div class="bpw-panel-card-body">
+                    <div class="chart-container">
+                        <div class="chart-wrapper">
+                            <div id="single-class-rate" class="bpw-chart-plot" style="width:100%;height:400px"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </section>` : ''}
+            ${(showJIT || showClasses) ? `</div>` : ''}
+            </div>
         `;
 
         section.style.display = 'block';
+
+        if (window.BpwExperimentLayout) {
+            BpwExperimentLayout.clearReplayPanels();
+            BpwExperimentLayout.initToggleButtons?.();
+            BpwExperimentLayout.applyMode?.(BpwExperimentLayout.getMode());
+            const initDeck = BpwExperimentLayout.initWorkspaceDeck || BpwExperimentLayout.initSectionNav;
+            if (typeof initDeck === 'function') initDeck();
+            BpwExperimentLayout.initPanelFocusButtons?.();
+        }
 
         const timeline = document.getElementById('single-replay-timeline');
         const meta = document.getElementById('single-replay-meta');
@@ -233,12 +376,31 @@
                 }, elapsedSeconds);
                 tasks.push(Plotly.react('single-gc', applyVisibilityToTraces('single-gc', gcTraces), gcLayout, getGcConfig('build-replay-gc')));
             }
+            const counterChart = (id, metric, title, yTitle) => {
+                const layout = getCounterLayout(title, yTitle);
+                layout.xaxis = { ...layout.xaxis, title: 'Elapsed (s)', tickformat: null, type: 'linear' };
+                const traces = buildMetricTraces(data, chartTimestamps, frameIndex, metric, {}, elapsedSeconds);
+                tasks.push(Plotly.react(id, applyVisibilityToTraces(id, traces), layout, getCounterConfig(`build-replay-${metric}`)));
+            };
+            if (showJIT) {
+                counterChart('single-jit-time', 'jitTime', 'Cumulative JIT Compilation Time', 'Compilation Time (s)');
+                counterChart('single-jit-rate', 'jitRate', 'JIT Compilation Activity', 'Compiled Methods / s');
+            }
+            if (showClasses) {
+                counterChart('single-classes-loaded', 'classesLoaded', 'Cumulative Classes Loaded', 'Classes Loaded');
+                counterChart('single-class-rate', 'classRate', 'Class Loading Activity', 'Classes / s');
+            }
 
             return Promise.all(tasks).then(() => {
                 setupSingleReplayFilters();
                 attachLegendVisibilityHandlers('single-rss', updateSingleReplayFilterCheckboxes);
                 if (showGC) {
                     attachLegendVisibilityHandlers('single-gc');
+                }
+                ['single-jit-time', 'single-jit-rate', 'single-classes-loaded', 'single-class-rate']
+                    .forEach(id => { if (document.getElementById(id)) attachLegendVisibilityHandlers(id); });
+                if (window.BpwExperimentLayout) {
+                    BpwExperimentLayout.resizeCharts();
                 }
             });
         }
@@ -288,6 +450,35 @@
                 speedMultiplier = parsed;
             }
         });
+
+        if (window.BpwChartStudio) {
+            BpwChartStudio.init({
+                samples,
+                runId: 'replay',
+                useElapsedAxis: true,
+                initialFrame: Math.max(0, chartTimestamps.length - 1)
+            });
+        }
+        if (window.BpwBuildStory) {
+            BpwBuildStory.init({
+                samples,
+                runId: 'replay',
+                useElapsedAxis: true,
+                initialFrame: Math.max(0, chartTimestamps.length - 1)
+            });
+        }
+
+        if (window.BpwExperimentLayout) {
+            BpwExperimentLayout.registerReplayPanel({
+                pause,
+                renderFrame,
+                getMaxFrame: () => chartTimestamps.length - 1
+            });
+            BpwExperimentLayout.initUnifiedReplay({
+                timestamps: chartTimestamps,
+                elapsedByTimestamp
+            });
+        }
 
         renderFrame(0);
     }

@@ -51,7 +51,7 @@ fi
 
 # Initialize log file with header (GC always enabled)
 echo "Session started: $(date '+%Y-%m-%d %H:%M:%S')" > "$LOG_FILE"
-echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB | GC_Time_S" >> "$LOG_FILE"
+echo "Elapsed_Time | PID | Name | Heap_Used_MB | Heap_Capacity_MB | RSS_MB | GC_Time_S | JIT_Compiled | JIT_Failed | JIT_Invalid | JIT_Time_S | Classes_Loaded | Classes_Unloaded | Class_Time_S" >> "$LOG_FILE"
 
 # Process info file for VM flags (used by cleanup to include in JSON artifact)
 PROCESS_INFO_FILE="${LOG_FILE%.log}.process_info"
@@ -78,6 +78,8 @@ echo "Start Time: $(date)" >> "$SCRIPT_DEBUG_LOG"
 echo "DEBUG_MODE: $DEBUG_MODE" >> "$SCRIPT_DEBUG_LOG"
 echo "REMOTE_MONITORING: $REMOTE_MONITORING" >> "$SCRIPT_DEBUG_LOG"
 echo "INTERVAL: $INTERVAL" >> "$SCRIPT_DEBUG_LOG"
+echo "EXPORT_TO_BIGQUERY: ${EXPORT_TO_BIGQUERY:-false}" >> "$SCRIPT_DEBUG_LOG"
+echo "PREDICTIVE_RELIABILITY: ${PREDICTIVE_RELIABILITY:-false}" >> "$SCRIPT_DEBUG_LOG"
 echo "PATTERNS: ${PATTERNS[*]}" >> "$SCRIPT_DEBUG_LOG"
 echo "PID: $$" >> "$SCRIPT_DEBUG_LOG"
 echo "" >> "$SCRIPT_DEBUG_LOG"
@@ -104,6 +106,59 @@ process_exists() {
     return 1
 }
 
+# Print requested jstat values in header order, using N/A for unavailable columns.
+jstat_named_values() {
+    local mode="$1"
+    local pid="$2"
+    shift 2
+    local output
+    output=$(jstat "$mode" "$pid" 2>/dev/null) || output=""
+    if [ -z "$output" ]; then
+        printf 'N/A'
+        printf '|N/A' $(seq 2 "$#")
+        return 1
+    fi
+
+    local header values
+    header=$(printf '%s\n' "$output" | awk 'NF { print; exit }')
+    values=$(printf '%s\n' "$output" | awk 'NF { line=$0 } END { print line }')
+    awk -v requested="$*" '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) column[$i] = i
+            next
+        }
+        {
+            count = split(requested, names, " ")
+            for (i = 1; i <= count; i++) {
+                if (i > 1) printf "|"
+                columnIndex = column[names[i]]
+                if (columnIndex > 0 && columnIndex <= NF) printf "%s", $columnIndex
+                else printf "N/A"
+            }
+        }
+    ' <<EOF
+$header
+$values
+EOF
+}
+
+seen_pids=""
+
+pid_seen() {
+    local pid="$1"
+    case " $seen_pids " in
+        *" $pid "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+mark_pid_seen() {
+    local pid="$1"
+    if ! pid_seen "$pid"; then
+        seen_pids="$seen_pids $pid"
+    fi
+}
+
 # Log network environment (proxy, DNS, etc.) for diagnostics
 log_script "Network environment diagnostics:"
 if [ -n "${HTTP_PROXY:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
@@ -125,7 +180,20 @@ get_auth_token() {
     fi
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Requesting auth token for run_id: $RUN_ID" >> "$BACKEND_DEBUG_LOG"
     
-    log_script "get_auth_token: Sending POST to $BACKEND_URL/auth/run/$RUN_ID"
+    local auth_path="$BACKEND_URL/auth/run/$RUN_ID"
+    local auth_params=()
+    if [ "${EXPORT_TO_BIGQUERY:-false}" = "true" ]; then
+        auth_params+=("export_to_bigquery=true")
+    fi
+    if [ "${PREDICTIVE_RELIABILITY:-false}" = "true" ]; then
+        auth_params+=("predictive_reliability=true")
+    fi
+    if [ ${#auth_params[@]} -gt 0 ]; then
+        local joined_params
+        joined_params=$(IFS='&'; echo "${auth_params[*]}")
+        auth_path="${auth_path}?${joined_params}"
+    fi
+    log_script "get_auth_token: Sending POST to $auth_path"
     local auth_response
     local http_code
     
@@ -134,7 +202,7 @@ get_auth_token() {
     log_script "get_auth_token: Starting curl request with timeout ${CURL_TIMEOUT}s, connect timeout ${CURL_CONNECT_TIMEOUT}s"
     auth_response=$(curl -s --max-time "$CURL_TIMEOUT" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
         -w "\nHTTP_CODE:%{http_code}\nTIME_TOTAL:%{time_total}\nTIME_CONNECT:%{time_connect}" \
-        -X POST "$BACKEND_URL/auth/run/$RUN_ID" \
+        -X POST "$auth_path" \
         -H "Content-Type: application/json" 2>&1)
     local curl_exit=$?
     
@@ -352,12 +420,19 @@ send_to_backend() {
     local heap_cap="$5"
     local rss="$6"
     local gc_time="${7:-}"
+    local jit_compiled="${8:-N/A}"
+    local jit_failed="${9:-N/A}"
+    local jit_invalid="${10:-N/A}"
+    local jit_time="${11:-N/A}"
+    local classes_loaded="${12:-N/A}"
+    local classes_unloaded="${13:-N/A}"
+    local class_time="${14:-N/A}"
     
     log_script "send_to_backend called: timestamp=$timestamp, pid=$pid, name=$name, heap_used=$heap_used, heap_cap=$heap_cap, rss=$rss, gc_time=$gc_time"
     
     # Prepare data in the format expected by our backend
     if [ -n "$gc_time" ]; then
-        local data_line="$timestamp | $pid | $name | $heap_used | $heap_cap | $rss | $gc_time"
+        local data_line="$timestamp | $pid | $name | $heap_used | $heap_cap | $rss | $gc_time | $jit_compiled | $jit_failed | $jit_invalid | $jit_time | $classes_loaded | $classes_unloaded | $class_time"
     else
         local data_line="$timestamp | $pid | $name | $heap_used | $heap_cap | $rss"
     fi
@@ -567,9 +642,6 @@ if [ "$DEBUG_MODE" = "true" ]; then
     echo "🔍 Looking for Java processes matching patterns: ${PATTERNS[*]}" >&2
 fi
 
-# Track which PIDs we've already sent VM flags for
-declare -A seen_pids=()
-
 log_script "Entering main monitoring loop"
 ITERATION=0
 
@@ -641,9 +713,9 @@ while true; do
         fi
         
         # Check if this is a new process we haven't seen before and get VM flags
-        if [ -z "${seen_pids[$PID]:-}" ]; then
+        if ! pid_seen "$PID"; then
           log_script "New process detected: PID $PID ($NAME) - first time seeing this PID"
-          seen_pids[$PID]=1
+          mark_pid_seen "$PID"
           if [ "$DEBUG_MODE" = "true" ]; then
             echo "🆕 New process detected: PID $PID ($NAME), getting VM flags..." >&2
           fi
@@ -687,14 +759,18 @@ while true; do
         fi
         {
           GC_LINE=$(jstat -gc "$PID" 2>/dev/null | tail -n 1)
+          JIT_VALUES=$(jstat_named_values -compiler "$PID" Compiled Failed Invalid Time)
+          CLASS_VALUES=$(jstat_named_values -class "$PID" Loaded Unloaded Time)
+          IFS='|' read -r JIT_COMPILED JIT_FAILED JIT_INVALID JIT_TIME_S <<< "$JIT_VALUES"
+          IFS='|' read -r CLASSES_LOADED CLASSES_UNLOADED CLASS_TIME_S <<< "$CLASS_VALUES"
           RSS_KB=$(ps -o rss= -p "$PID" 2>/dev/null | tr -d ' ')
           [[ -z "$RSS_KB" ]] && continue
           RSS_MB=$(awk "BEGIN { printf \"%.1f\", $RSS_KB / 1024 }")
 
           if [[ -z "$GC_LINE" ]]; then
-            echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB | N/A" >> "$LOG_FILE"
+            echo "$TIMESTAMP | $PID | $NAME | N/A | N/A | ${RSS_MB}MB | N/A | $JIT_COMPILED | $JIT_FAILED | $JIT_INVALID | $JIT_TIME_S | $CLASSES_LOADED | $CLASSES_UNLOADED | $CLASS_TIME_S" >> "$LOG_FILE"
             # Store process data for batch sending
-            process_data+=("$TIMESTAMP|$PID|$NAME|0|0|${RSS_MB}MB|N/A")
+            process_data+=("$TIMESTAMP|$PID|$NAME|0|0|${RSS_MB}MB|N/A|$JIT_COMPILED|$JIT_FAILED|$JIT_INVALID|$JIT_TIME_S|$CLASSES_LOADED|$CLASSES_UNLOADED|$CLASS_TIME_S")
           else
             EC=$(echo "$GC_LINE" | awk '{print $5}')
             EU=$(echo "$GC_LINE" | awk '{print $6}')
@@ -717,9 +793,9 @@ while true; do
             else
               GC_TIME_S="N/A"
             fi
-            echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB | ${GC_TIME_S}s" >> "$LOG_FILE"
+            echo "$TIMESTAMP | $PID | $NAME | ${HEAP_USED_MB}MB | ${HEAP_CAP_MB}MB | ${RSS_MB}MB | ${GC_TIME_S}s | $JIT_COMPILED | $JIT_FAILED | $JIT_INVALID | $JIT_TIME_S | $CLASSES_LOADED | $CLASSES_UNLOADED | $CLASS_TIME_S" >> "$LOG_FILE"
             # Store process data for batch sending
-            process_data+=("$TIMESTAMP|$PID|$NAME|${HEAP_USED_MB}MB|${HEAP_CAP_MB}MB|${RSS_MB}MB|${GC_TIME_S}s")
+            process_data+=("$TIMESTAMP|$PID|$NAME|${HEAP_USED_MB}MB|${HEAP_CAP_MB}MB|${RSS_MB}MB|${GC_TIME_S}s|$JIT_COMPILED|$JIT_FAILED|$JIT_INVALID|$JIT_TIME_S|$CLASSES_LOADED|$CLASSES_UNLOADED|$CLASS_TIME_S")
           fi
         } || { 
           log_script "ERROR: Failed to process memory data for PID $PID ($NAME) at $TIMESTAMP"
@@ -750,9 +826,9 @@ while true; do
     for data_line in "${process_data[@]}"; do
       sends_attempted=$((sends_attempted + 1))
       log_script "Sending data line: '$data_line'"
-      IFS='|' read -r ts pid name heap_used heap_cap rss gc_time <<< "$data_line"
+      IFS='|' read -r ts pid name heap_used heap_cap rss gc_time jit_compiled jit_failed jit_invalid jit_time classes_loaded classes_unloaded class_time <<< "$data_line"
       log_script "Calling send_to_backend with GC data for PID $pid"
-      if send_to_backend "$ts" "$pid" "$name" "${heap_used}MB" "${heap_cap}MB" "${rss}MB" "$gc_time"; then
+      if send_to_backend "$ts" "$pid" "$name" "$heap_used" "$heap_cap" "$rss" "$gc_time" "$jit_compiled" "$jit_failed" "$jit_invalid" "$jit_time" "$classes_loaded" "$classes_unloaded" "$class_time"; then
         sends_succeeded=$((sends_succeeded + 1))
         log_script "send_to_backend succeeded for PID $pid"
       else

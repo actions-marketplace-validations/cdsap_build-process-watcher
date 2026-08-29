@@ -1,13 +1,13 @@
 (function (global) {
     const COLOR_PALETTE = [
-        '#3498db',
-        '#e74c3c',
-        '#9b59b6',
-        '#2ecc71',
-        '#f39c12',
-        '#e67e22',
-        '#1abc9c',
-        '#e91e63'
+        '#087f8c',
+        '#c9513d',
+        '#b88414',
+        '#247b5b',
+        '#4f5d95',
+        '#9a4d74',
+        '#6f5b3e',
+        '#2f7f6f'
     ];
 
     const visibilityStore = {};
@@ -55,6 +55,18 @@
 
     function hasRatioData(samples) {
         return samples.some(sample => sample && sample.RSS && sample.RSS > 0);
+    }
+
+    function isValidMetric(value) {
+        return value !== null && value !== undefined && Number.isFinite(Number(value));
+    }
+
+    function hasJITData(samples) {
+        return samples.some(sample => isValidMetric(sample?.JITCompilationTimeMs) || isValidMetric(sample?.JITCompiledMethods));
+    }
+
+    function hasClassLoadingData(samples) {
+        return samples.some(sample => isValidMetric(sample?.ClassesLoaded) || isValidMetric(sample?.ClassLoadTimeMs));
     }
 
     function buildColorMap(processKeys, palette = COLOR_PALETTE) {
@@ -202,6 +214,58 @@
         });
     }
 
+    function buildCounterSeries(samples, timestamps, processName, pid, valueSelector) {
+        const observations = samples
+            .filter(sample => sample.Name === processName && sample.PID === pid)
+            .map(sample => ({ timestamp: sample.Timestamp, value: valueSelector(sample) }))
+            .filter(point => isValidMetric(point.value))
+            .map(point => ({ ...point, value: Number(point.value) }))
+            .sort((a, b) => a.timestamp - b.timestamp);
+        const rateObservations = [];
+        let previous = null;
+        observations.forEach(point => {
+            if (previous) {
+                const elapsedSeconds = (point.timestamp - previous.timestamp) / 1000;
+                if (elapsedSeconds > 0 && point.value >= previous.value) {
+                    rateObservations.push({
+                        timestamp: point.timestamp,
+                        value: (point.value - previous.value) / elapsedSeconds
+                    });
+                }
+            }
+            previous = point;
+        });
+
+        let displayValue = null;
+        let observationIndex = 0;
+        let rateIndex = 0;
+        let lastRate = null;
+        let lastRateTimestamp = 0;
+        const medianDelta = getMedianDelta(timestamps);
+        const maxGap = medianDelta ? medianDelta * 2 : 0;
+        return {
+            observations,
+            cumulative: timestamps.map(timestamp => {
+                while (observationIndex < observations.length && observations[observationIndex].timestamp <= timestamp) {
+                    displayValue = observations[observationIndex].value;
+                    observationIndex += 1;
+                }
+                return displayValue;
+            }),
+            rate: timestamps.map(timestamp => {
+                while (rateIndex < rateObservations.length && rateObservations[rateIndex].timestamp <= timestamp) {
+                    lastRate = rateObservations[rateIndex].value;
+                    lastRateTimestamp = rateObservations[rateIndex].timestamp;
+                    rateIndex += 1;
+                }
+                if (lastRateTimestamp === timestamp || (maxGap > 0 && lastRateTimestamp > 0 && (timestamp - lastRateTimestamp) <= maxGap)) {
+                    return lastRate;
+                }
+                return null;
+            })
+        };
+    }
+
     function buildReplayData(samples, timestamps, palette = COLOR_PALETTE) {
         const processKeys = [...new Set(samples.map(s => `${s.Name}|${s.PID}`))];
         const colorMap = buildColorMap(processKeys, palette);
@@ -221,6 +285,9 @@
                 if (!s.RSS || s.RSS <= 0) return null;
                 return s.HeapUsed / s.RSS;
             });
+            const jitTime = buildCounterSeries(samples, timestamps, processName, pid, s => isValidMetric(s.JITCompilationTimeMs) ? s.JITCompilationTimeMs / 1000 : null);
+            const jitActivity = buildCounterSeries(samples, timestamps, processName, pid, s => s.JITCompiledMethods);
+            const classes = buildCounterSeries(samples, timestamps, processName, pid, s => s.ClassesLoaded);
 
             series[processKey] = {
                 processName,
@@ -230,9 +297,17 @@
                 heap,
                 gc,
                 ratio,
+                jitTime: jitTime.cumulative,
+                jitRate: jitActivity.rate,
+                classesLoaded: classes.cumulative,
+                classRate: classes.rate,
                 firstRss: rss.findIndex(value => value !== null),
                 firstGc: gc.findIndex(value => value !== null),
-                firstRatio: ratio.findIndex(value => value !== null)
+                firstRatio: ratio.findIndex(value => value !== null),
+                firstJitTime: jitTime.cumulative.findIndex(value => value !== null),
+                firstJitRate: jitActivity.rate.findIndex(value => value !== null),
+                firstClassesLoaded: classes.cumulative.findIndex(value => value !== null),
+                firstClassRate: classes.rate.findIndex(value => value !== null)
             };
         });
 
@@ -257,9 +332,17 @@
                     heap: def.heap.slice(0, buildEndIndex),
                     gc: def.gc.slice(0, buildEndIndex),
                     ratio: def.ratio.slice(0, buildEndIndex),
+                    jitTime: def.jitTime.slice(0, buildEndIndex),
+                    jitRate: def.jitRate.slice(0, buildEndIndex),
+                    classesLoaded: def.classesLoaded.slice(0, buildEndIndex),
+                    classRate: def.classRate.slice(0, buildEndIndex),
                     firstRss: def.firstRss >= buildEndIndex ? -1 : def.firstRss,
                     firstGc: def.firstGc >= buildEndIndex ? -1 : def.firstGc,
-                    firstRatio: def.firstRatio >= buildEndIndex ? -1 : def.firstRatio
+                    firstRatio: def.firstRatio >= buildEndIndex ? -1 : def.firstRatio,
+                    firstJitTime: def.firstJitTime >= buildEndIndex ? -1 : def.firstJitTime,
+                    firstJitRate: def.firstJitRate >= buildEndIndex ? -1 : def.firstJitRate,
+                    firstClassesLoaded: def.firstClassesLoaded >= buildEndIndex ? -1 : def.firstClassesLoaded,
+                    firstClassRate: def.firstClassRate >= buildEndIndex ? -1 : def.firstClassRate
                 };
             });
         }
@@ -298,6 +381,9 @@
             let maxRss = 0;
             let maxHeap = 0;
             let maxGCTimeSeconds = 0;
+            let finalCompiledMethods = null;
+            let finalJITTimeMs = null;
+            let finalClassesLoaded = null;
             let minTimestamp = Number.POSITIVE_INFINITY;
             let maxTimestamp = 0;
 
@@ -314,6 +400,9 @@
                         maxGCTimeSeconds = gcSeconds;
                     }
                 }
+                if (isValidMetric(sample.JITCompiledMethods)) finalCompiledMethods = Number(sample.JITCompiledMethods);
+                if (isValidMetric(sample.JITCompilationTimeMs)) finalJITTimeMs = Number(sample.JITCompilationTimeMs);
+                if (isValidMetric(sample.ClassesLoaded)) finalClassesLoaded = Number(sample.ClassesLoaded);
                 if (sample.Timestamp && sample.Timestamp < minTimestamp) {
                     minTimestamp = sample.Timestamp;
                 }
@@ -336,7 +425,10 @@
                 maxRss,
                 maxHeap,
                 totalGCTime: maxGCTimeSeconds,
-                durationSeconds
+                durationSeconds,
+                finalCompiledMethods,
+                finalJITTimeMs,
+                finalClassesLoaded
             };
         }
 
@@ -350,6 +442,9 @@
                     maxHeap: entry.maxHeap || 0,
                     totalGCTime: entry.totalGCTime || 0,
                     durationSeconds: entry.durationSeconds || 0,
+                    finalCompiledMethods: entry.finalCompiledMethods,
+                    finalJITTimeMs: entry.finalJITTimeMs,
+                    finalClassesLoaded: entry.finalClassesLoaded,
                     vmFlags: [...new Set(entry.vmFlags || [])],
                     pids: entry.pid ? [entry.pid] : []
                 };
@@ -359,6 +454,9 @@
             byName[name].maxHeap = Math.max(byName[name].maxHeap, entry.maxHeap || 0);
             byName[name].totalGCTime = Math.max(byName[name].totalGCTime, entry.totalGCTime || 0);
             byName[name].durationSeconds = Math.max(byName[name].durationSeconds || 0, entry.durationSeconds || 0);
+            if (entry.finalCompiledMethods !== null) byName[name].finalCompiledMethods = Math.max(byName[name].finalCompiledMethods ?? 0, entry.finalCompiledMethods);
+            if (entry.finalJITTimeMs !== null) byName[name].finalJITTimeMs = Math.max(byName[name].finalJITTimeMs ?? 0, entry.finalJITTimeMs);
+            if (entry.finalClassesLoaded !== null) byName[name].finalClassesLoaded = Math.max(byName[name].finalClassesLoaded ?? 0, entry.finalClassesLoaded);
             if (entry.heapMaxGiB) {
                 const value = Number(entry.heapMaxGiB);
                 if (!Number.isNaN(value)) {
@@ -403,7 +501,16 @@
         const traces = [];
         data.processKeys.forEach(processKey => {
             const def = data.series[processKey];
-            const firstIndex = metric === 'gc' ? def.firstGc : metric === 'ratio' ? def.firstRatio : def.firstRss;
+            const metricMap = {
+                gc: ['firstGc', 'gc'],
+                ratio: ['firstRatio', 'ratio'],
+                jitTime: ['firstJitTime', 'jitTime'],
+                jitRate: ['firstJitRate', 'jitRate'],
+                classesLoaded: ['firstClassesLoaded', 'classesLoaded'],
+                classRate: ['firstClassRate', 'classRate']
+            };
+            const [firstKey, valueKey] = metricMap[metric] || ['firstRss', 'rss'];
+            const firstIndex = def[firstKey];
             if (firstIndex === -1 || frameIndex < firstIndex) return;
             if (metric === 'rss') {
                 traces.push({
@@ -430,7 +537,7 @@
             }
             traces.push({
                 x: frameTimestamps,
-                y: metric === 'gc' ? def.gc.slice(0, frameIndex + 1) : def.ratio.slice(0, frameIndex + 1),
+                y: def[valueKey].slice(0, frameIndex + 1),
                 type: 'scatter',
                 mode: 'lines+markers',
                 name: `${def.processName} PID:${def.pid}`,
@@ -461,6 +568,133 @@
         return traces;
     }
 
+    const METRIC_CATALOG = {
+        rss: { label: 'Memory', yTitle: 'Memory (MB)', color: '#087f8c' },
+        gc: { label: 'GC time', yTitle: 'GC Time (s)', color: '#087f8c' },
+        ratio: { label: 'Heap/RSS', yTitle: 'Heap/RSS Ratio', color: '#087f8c' },
+        jitTime: { label: 'JIT time', yTitle: 'Compilation Time (s)', color: '#b88414' },
+        jitRate: { label: 'JIT rate', yTitle: 'Compiled Methods / s', color: '#b88414' },
+        classesLoaded: { label: 'Classes loaded', yTitle: 'Classes Loaded', color: '#247b5b' },
+        classRate: { label: 'Class rate', yTitle: 'Classes / s', color: '#247b5b' }
+    };
+
+    const OVERLAY_PRESETS = {
+        'memory-gc': { a: 'rss', b: 'gc', label: 'Memory + GC' },
+        'memory-ratio': { a: 'rss', b: 'ratio', label: 'Memory + Heap/RSS' },
+        'jit-duo': { a: 'jitTime', b: 'jitRate', label: 'JIT overlay' },
+        'classes-duo': { a: 'classesLoaded', b: 'classRate', label: 'Classes overlay' },
+        'gc-jit': { a: 'gc', b: 'jitRate', label: 'GC + JIT activity' }
+    };
+
+    function getAvailableOverlayMetrics(samples) {
+        const metrics = ['rss'];
+        if (hasGCData(samples)) metrics.push('gc');
+        if (hasRatioData(samples)) metrics.push('ratio');
+        if (hasJITData(samples)) metrics.push('jitTime', 'jitRate');
+        if (hasClassLoadingData(samples)) metrics.push('classesLoaded', 'classRate');
+        return metrics;
+    }
+
+    function buildOverlayTraces(data, timestamps, frameIndex, metricA, metricB, xValues, styleOverrides) {
+        const x = xValues
+            ? xValues.slice(0, frameIndex + 1)
+            : timestamps.slice(0, frameIndex + 1).map(t => new Date(t));
+        const traces = [];
+        const catA = METRIC_CATALOG[metricA] || { label: metricA, color: '#087f8c' };
+        const catB = METRIC_CATALOG[metricB] || { label: metricB, color: '#c9513d' };
+
+        if (metricA) {
+            const styleA = {
+                lineWidth: 2.5,
+                lineOpacity: 0.95,
+                includeTotalRss: metricA === 'rss',
+                ...styleOverrides?.a
+            };
+            buildMetricTraces(data, timestamps, frameIndex, metricA, styleA, xValues).forEach((trace) => {
+                traces.push({
+                    ...trace,
+                    yaxis: 'y',
+                    legendgroup: 'layer-a',
+                    name: trace.name ? `${catA.label} · ${trace.name}` : catA.label,
+                    line: { ...trace.line, color: trace.line?.color || catA.color }
+                });
+            });
+        }
+
+        if (metricB && metricB !== metricA) {
+            const styleB = {
+                lineWidth: 2,
+                lineDash: 'dot',
+                lineOpacity: 0.88,
+                includeTotalRss: metricB === 'rss',
+                ...styleOverrides?.b
+            };
+            buildMetricTraces(data, timestamps, frameIndex, metricB, styleB, xValues).forEach((trace) => {
+                traces.push({
+                    ...trace,
+                    yaxis: 'y2',
+                    legendgroup: 'layer-b',
+                    name: trace.name ? `${catB.label} · ${trace.name}` : catB.label,
+                    line: { ...trace.line, color: trace.line?.color || catB.color }
+                });
+            });
+        }
+
+        return traces;
+    }
+
+    function getOverlayLayout(metricA, metricB, options) {
+        const catA = METRIC_CATALOG[metricA] || { yTitle: metricA, color: '#087f8c' };
+        const catB = metricB && metricB !== metricA
+            ? (METRIC_CATALOG[metricB] || { yTitle: metricB, color: '#c9513d' })
+            : null;
+        const isMobile = window.innerWidth < 768;
+        const base = getMemoryLayout();
+        const layout = {
+            ...base,
+            title: options?.title || '',
+            showlegend: true,
+            legend: {
+                orientation: 'h',
+                x: 0,
+                y: isMobile ? -0.35 : -0.28,
+                xanchor: 'left',
+                font: { size: isMobile ? 9 : 10 }
+            },
+            margin: {
+                l: isMobile ? 52 : 64,
+                r: catB ? (isMobile ? 56 : 72) : (isMobile ? 24 : 32),
+                t: isMobile ? 28 : 40,
+                b: isMobile ? 100 : 110
+            },
+            yaxis: {
+                ...base.yaxis,
+                title: catA.yTitle,
+                titlefont: { color: catA.color, size: 12 },
+                tickfont: { color: catA.color }
+            }
+        };
+
+        if (catB) {
+            layout.yaxis2 = {
+                title: catB.yTitle,
+                titlefont: { color: catB.color, size: 12 },
+                tickfont: { color: catB.color },
+                overlaying: 'y',
+                side: 'right',
+                showgrid: false,
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
+            };
+        }
+
+        return layout;
+    }
+
+    function getOverlayConfig(filenameBase = 'bpw-studio') {
+        return getMemoryConfig(filenameBase);
+    }
+
     function parseCsvText(text) {
         const lines = text.trim().split('\n');
         if (lines.length < 2) return [];
@@ -489,15 +723,62 @@
                 HeapUsed: Number(get('heap_used_mb')) || 0,
                 HeapCap: Number(get('heap_capacity_mb')) || 0,
                 GCTime: gcValue !== null && !Number.isNaN(gcValue) ? gcValue * 1000 : null,
-                GCTimeSeconds: gcValue !== null && !Number.isNaN(gcValue) ? gcValue : null
+                GCTimeSeconds: gcValue !== null && !Number.isNaN(gcValue) ? gcValue : null,
+                JITCompiledMethods: get('jit_compiled_methods') === '' ? null : Number(get('jit_compiled_methods')),
+                JITFailedCompilations: get('jit_failed_compilations') === '' ? null : Number(get('jit_failed_compilations')),
+                JITInvalidatedCompilations: get('jit_invalidated_compilations') === '' ? null : Number(get('jit_invalidated_compilations')),
+                JITCompilationTimeMs: get('jit_compilation_time_ms') === '' ? null : Number(get('jit_compilation_time_ms')),
+                ClassesLoaded: get('classes_loaded') === '' ? null : Number(get('classes_loaded')),
+                ClassesUnloaded: get('classes_unloaded') === '' ? null : Number(get('classes_unloaded')),
+                ClassLoadTimeMs: get('class_load_time_ms') === '' ? null : Number(get('class_load_time_ms'))
             };
         });
         return parsed;
     }
 
+    function expandSamples(raw) {
+        const samples = Array.isArray(raw?.samples) ? raw.samples : [];
+        if (!samples.length || !Array.isArray(samples[0])) return samples;
+        const fields = Array.isArray(raw?.sample_fields) ? raw.sample_fields : [];
+        if (!fields.length) return [];
+        return samples.map(row => Object.fromEntries(fields.map((field, index) => [field, row[index]])));
+    }
+
+    function compactSamples(samples) {
+        const fields = [];
+        const seen = new Set();
+        samples.forEach(sample => {
+            Object.keys(sample || {}).forEach(field => {
+                if (!seen.has(field)) {
+                    seen.add(field);
+                    fields.push(field);
+                }
+            });
+        });
+        return {
+            sample_fields: fields,
+            samples: samples.map(sample => fields.map(field => sample[field] ?? null))
+        };
+    }
+
+    function normalizeReportData(raw) {
+        return {
+            ...(raw || {}),
+            samples: expandSamples(raw)
+        };
+    }
+
+    function compactReportData(raw) {
+        const compact = compactSamples(Array.isArray(raw?.samples) ? raw.samples : []);
+        return {
+            ...(raw || {}),
+            ...compact
+        };
+    }
+
     function parseJsonText(text) {
         const raw = JSON.parse(text);
-        const samples = Array.isArray(raw?.samples) ? raw.samples : [];
+        const samples = expandSamples(raw);
         const processInfo = raw?.process_info && typeof raw.process_info === 'object' ? raw.process_info : {};
         const processSummary = raw?.process_summary || buildProcessSummary(samples, processInfo);
         return {
@@ -524,12 +805,23 @@
         const isMobile = window.innerWidth < 768;
         return {
             title: isMobile ? '' : 'Garbage Collection Time Over Time',
+            paper_bgcolor: '#ffffff',
+            plot_bgcolor: '#fbfaf6',
+            hovermode: 'x unified',
             xaxis: {
                 title: 'Time',
                 tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
-                tickangle: isMobile ? -45 : 0
+                tickangle: isMobile ? -45 : 0,
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
             },
-            yaxis: { title: 'GC Time (s)' },
+            yaxis: {
+                title: 'GC Time (s)',
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
+            },
             showlegend: true,
             legend: {
                 x: isMobile ? 0.5 : 1.02,
@@ -544,7 +836,9 @@
                 b: isMobile ? 80 : 60
             },
             font: {
-                size: isMobile ? 10 : 12
+                size: isMobile ? 10 : 12,
+                color: '#161a1d',
+                family: '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
             }
         };
     }
@@ -566,16 +860,36 @@
         };
     }
 
+    function getCounterLayout(title, yTitle) {
+        const layout = getGcLayout();
+        return { ...layout, title: window.innerWidth < 768 ? '' : title, yaxis: { ...layout.yaxis, title: yTitle } };
+    }
+
+    function getCounterConfig(filenameBase) {
+        return getGcConfig(filenameBase);
+    }
+
     function getRatioLayout() {
         const isMobile = window.innerWidth < 768;
         return {
             title: isMobile ? '' : 'Heap/RSS Ratio Over Time',
+            paper_bgcolor: '#ffffff',
+            plot_bgcolor: '#fbfaf6',
+            hovermode: 'x unified',
             xaxis: {
                 title: 'Time',
                 tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
-                tickangle: isMobile ? -45 : 0
+                tickangle: isMobile ? -45 : 0,
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
             },
-            yaxis: { title: 'Heap/RSS Ratio' },
+            yaxis: {
+                title: 'Heap/RSS Ratio',
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
+            },
             showlegend: true,
             legend: {
                 x: isMobile ? 0.5 : 1.02,
@@ -590,7 +904,9 @@
                 b: isMobile ? 80 : 60
             },
             font: {
-                size: isMobile ? 10 : 12
+                size: isMobile ? 10 : 12,
+                color: '#161a1d',
+                family: '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
             }
         };
     }
@@ -616,12 +932,23 @@
         const isMobile = window.innerWidth < 768;
         return {
             title: isMobile ? '' : 'Memory Usage Over Time',
+            paper_bgcolor: '#ffffff',
+            plot_bgcolor: '#fbfaf6',
+            hovermode: 'x unified',
             xaxis: {
                 title: 'Time',
                 tickformat: isMobile ? '%H:%M' : '%H:%M:%S',
-                tickangle: isMobile ? -45 : 0
+                tickangle: isMobile ? -45 : 0,
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
             },
-            yaxis: { title: 'Memory (MB)' },
+            yaxis: {
+                title: 'Memory (MB)',
+                gridcolor: '#e4e2d8',
+                zerolinecolor: '#d8d4c7',
+                linecolor: '#c8cfc5'
+            },
             showlegend: true,
             legend: {
                 x: isMobile ? 0.5 : 1.02,
@@ -636,7 +963,9 @@
                 b: isMobile ? 80 : 60
             },
             font: {
-                size: isMobile ? 10 : 12
+                size: isMobile ? 10 : 12,
+                color: '#161a1d',
+                family: '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
             }
         };
     }
@@ -664,6 +993,16 @@
         return value.toFixed(digits);
     }
 
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
     function formatDelta(value, digits = 1) {
         if (value === null || value === undefined || Number.isNaN(value)) return 'N/A';
         const sign = value > 0 ? '+' : '';
@@ -678,80 +1017,195 @@
         return 'Other';
     }
 
+    const GC_COLLECTOR_FLAGS = [
+        { flag: 'UseG1GC', label: 'G1' },
+        { flag: 'UseZGC', label: 'ZGC' },
+        { flag: 'UseShenandoahGC', label: 'Shenandoah' },
+        { flag: 'UseParallelGC', label: 'Parallel' },
+        { flag: 'UseSerialGC', label: 'Serial' },
+        { flag: 'UseConcMarkSweepGC', label: 'CMS' },
+        { flag: 'UseEpsilonGC', label: 'Epsilon' }
+    ];
+
+    const GC_FLAG_PATTERN = /(?:^-(?:Xlog:gc|verbose:gc)|(?:GC|G1|ZGC|ZCollection|Shenandoah|MaxGCPauseMillis|InitiatingHeapOccupancyPercent|ConcGCThreads|ParallelGCThreads|SurvivorRatio|TenuringThreshold|ExplicitGC))/i;
+
+    function normalizeFlags(vmFlags) {
+        if (!Array.isArray(vmFlags)) return [];
+        return [...new Set(vmFlags.filter(Boolean).map(flag => String(flag)))].sort((a, b) => a.localeCompare(b));
+    }
+
+    function getGcType(vmFlags) {
+        const flags = normalizeFlags(vmFlags);
+        const disabledCollectors = new Set(flags
+            .map(flag => flag.match(/^-XX:-([A-Za-z0-9]+GC)$/)?.[1])
+            .filter(Boolean));
+        const enabled = GC_COLLECTOR_FLAGS
+            .filter(({ flag }) => !disabledCollectors.has(flag) && flags.some(entry => entry.includes(`+${flag}`)))
+            .map(({ label }) => label);
+        return enabled.length ? enabled.join(' + ') : 'Default';
+    }
+
+    function getGcFlags(vmFlags) {
+        return normalizeFlags(vmFlags).filter(flag => GC_FLAG_PATTERN.test(flag));
+    }
+
+    function diffFlags(baseFlags, compareFlags) {
+        const baseSet = new Set(baseFlags);
+        const compareSet = new Set(compareFlags);
+        return {
+            added: compareFlags.filter(flag => !baseSet.has(flag)),
+            removed: baseFlags.filter(flag => !compareSet.has(flag)),
+            shared: compareFlags.filter(flag => baseSet.has(flag))
+        };
+    }
+
     function buildCompareSummaryHtml({ baseLabel, compareLabel, baseProcessSummary, compareProcessSummary }) {
         const baseSummary = baseProcessSummary;
         const compareSummary = compareProcessSummary;
-        if (!baseSummary || !compareSummary) {
-            return '';
-        }
+        if (!baseSummary || !compareSummary) return '';
 
-        const buildTable = (summary, label) => {
-            const entries = Object.values(summary.byName || {});
-            if (!entries.length) return '';
-            const rows = entries
-                .slice()
-                .sort((a, b) => (b.durationSeconds || 0) - (a.durationSeconds || 0))
-                .map(item => {
-                    const flagList = (item.vmFlags || []).length
-                        ? `
-                            <details>
-                                <summary class="meta">View flags (${item.vmFlags.length})</summary>
-                                <div class="vm-flags-list" style="margin-top: 0.35rem;">
-                                    ${item.vmFlags.map(flag => `<span class="vm-flag">${flag}</span>`).join('')}
-                                </div>
-                            </details>
-                        `
-                        : '<span class="meta">No VM flags</span>';
-                    const pidList = (item.pids || []).length ? item.pids.join(', ') : 'N/A';
-                    return `
-                        <tr>
-                            <td style="padding: 0.5rem; font-weight: 600;">${item.name}</td>
-                            <td style="padding: 0.5rem;">${pidList}</td>
-                            <td style="padding: 0.5rem;">${formatValue(item.heapMaxGiB, 2)}</td>
-                            <td style="padding: 0.5rem;">${formatValue(item.maxRss, 1)} MB</td>
-                            <td style="padding: 0.5rem;">${formatValue(item.maxHeap, 1)} MB</td>
-                            <td style="padding: 0.5rem;">${formatValue(item.totalGCTime, 3)} s</td>
-                            <td style="padding: 0.5rem;">${formatValue(item.durationSeconds, 1)} s</td>
-                            <td style="padding: 0.5rem;">${flagList}</td>
-                        </tr>
-                    `;
-                }).join('');
+        const baseByName = baseSummary.byName || {};
+        const compareByName = compareSummary.byName || {};
+        const names = [...new Set([...Object.keys(baseByName), ...Object.keys(compareByName)])]
+            .sort((a, b) => getProcessType(a).localeCompare(getProcessType(b)) || a.localeCompare(b));
+        if (!names.length) return '';
 
+        const safeBaseLabel = escapeHtml(baseLabel);
+        const safeCompareLabel = escapeHtml(compareLabel);
+        const readMetric = (entry, key) => {
+            if (!entry) return null;
+            if (key === 'jitTimeSeconds') {
+                return entry.finalJITTimeMs === null || entry.finalJITTimeMs === undefined ? null : entry.finalJITTimeMs / 1000;
+            }
+            return entry[key] === undefined ? null : entry[key];
+        };
+        const formatMetric = (value, decimals, suffix) => {
+            if (value === null || value === undefined || Number.isNaN(Number(value))) return 'N/A';
+            return `${formatValue(value, decimals)}${suffix || ''}`;
+        };
+        const deltaClass = (delta) => {
+            if (!Number.isFinite(delta) || delta === 0) return 'neutral';
+            return delta > 0 ? 'up' : 'down';
+        };
+        const renderMetric = (label, key, decimals, suffix, baseEntry, compareEntry) => {
+            const baseValue = readMetric(baseEntry, key);
+            const compareValue = readMetric(compareEntry, key);
+            const delta = baseValue !== null && compareValue !== null ? compareValue - baseValue : null;
             return `
-                <div style="margin-top: 1rem; padding: 1rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 0.75rem;">
-                    <h4 style="margin-bottom: 0.75rem;">${label}</h4>
-                    <div style="overflow-x: auto;">
-                        <table style="width: 100%; border-collapse: collapse; min-width: 720px;">
-                            <thead>
-                                <tr style="text-align: left; border-bottom: 1px solid #e5e7eb;">
-                                    <th style="padding: 0.5rem;">Process</th>
-                                    <th style="padding: 0.5rem;">PIDs</th>
-                                    <th style="padding: 0.5rem;">Heap Max (GiB)</th>
-                                    <th style="padding: 0.5rem;">Max RSS (MB)</th>
-                                    <th style="padding: 0.5rem;">Max Heap (MB)</th>
-                                    <th style="padding: 0.5rem;">Total GC (s)</th>
-                                    <th style="padding: 0.5rem;">Duration (s)</th>
-                                    <th style="padding: 0.5rem;">VM Flags</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${rows}
-                            </tbody>
-                        </table>
+                <div class="compare-process-metric">
+                    <span>${label}</span>
+                    <strong>${formatMetric(baseValue, decimals, suffix)}</strong>
+                    <strong>${formatMetric(compareValue, decimals, suffix)}</strong>
+                    <em class="${deltaClass(delta)}">${delta === null ? 'N/A' : `${delta > 0 ? '+' : ''}${formatValue(delta, decimals)}${suffix || ''}`}</em>
+                </div>
+            `;
+        };
+        const renderTextMetric = (label, baseValue, compareValue) => {
+            const safeBaseValue = escapeHtml(baseValue);
+            const safeCompareValue = escapeHtml(compareValue);
+            const changed = baseValue !== compareValue;
+            return `
+                <div class="compare-process-metric">
+                    <span>${label}</span>
+                    <strong>${safeBaseValue}</strong>
+                    <strong>${safeCompareValue}</strong>
+                    <em class="${changed ? 'changed' : 'neutral'}">${changed ? 'Changed' : 'Same'}</em>
+                </div>
+            `;
+        };
+        const renderFlags = (entry, label) => {
+            const flags = entry?.vmFlags || [];
+            if (!flags.length) return `<span class="meta">${label}: no VM flags</span>`;
+            return `
+                <details class="compare-process-flags">
+                    <summary>${label}: VM flags (${flags.length})</summary>
+                    <div class="vm-flags-list">${flags.map(flag => `<span class="vm-flag">${escapeHtml(flag)}</span>`).join('')}</div>
+                </details>
+            `;
+        };
+        const renderGcFlagDiff = (baseEntry, compareEntry) => {
+            const diff = diffFlags(getGcFlags(baseEntry?.vmFlags), getGcFlags(compareEntry?.vmFlags));
+            const renderGroup = (label, flags, className) => {
+                if (!flags.length) return '';
+                return `
+                    <div class="compare-process-flag-group ${className}">
+                        <span>${label}</span>
+                        <div class="vm-flags-list">${flags.map(flag => `<span class="vm-flag">${escapeHtml(flag)}</span>`).join('')}</div>
                     </div>
+                `;
+            };
+            if (!diff.added.length && !diff.removed.length) {
+                const sharedText = diff.shared.length
+                    ? `${diff.shared.length} shared GC flag${diff.shared.length === 1 ? '' : 's'}`
+                    : 'No explicit GC flags in either run';
+                return `
+                    <div class="compare-process-flag-diff">
+                        <strong>GC flag differences</strong>
+                        <span class="meta">${sharedText}; no changes detected.</span>
+                    </div>
+                `;
+            }
+            return `
+                <div class="compare-process-flag-diff">
+                    <strong>GC flag differences</strong>
+                    ${renderGroup(`Added in ${safeCompareLabel}`, diff.added, 'added')}
+                    ${renderGroup(`Removed from ${safeBaseLabel}`, diff.removed, 'removed')}
                 </div>
             `;
         };
 
-        const baseTable = buildTable(baseSummary, baseLabel);
-        const compareTable = buildTable(compareSummary, compareLabel);
-        if (!baseTable && !compareTable) return '';
+        const cards = names.map((name) => {
+            const baseEntry = baseByName[name] || null;
+            const compareEntry = compareByName[name] || null;
+            const safeName = escapeHtml(name);
+            const safeType = escapeHtml(getProcessType(name));
+            const basePids = baseEntry?.pids?.length ? baseEntry.pids.map(escapeHtml).join(', ') : 'missing';
+            const comparePids = compareEntry?.pids?.length ? compareEntry.pids.map(escapeHtml).join(', ') : 'missing';
+            const baseGcType = baseEntry ? getGcType(baseEntry.vmFlags) : 'N/A';
+            const compareGcType = compareEntry ? getGcType(compareEntry.vmFlags) : 'N/A';
+            return `
+                <article class="compare-process-card">
+                    <div class="compare-process-title">
+                        <div>
+                            <span>${safeType}</span>
+                            <h4>${safeName}</h4>
+                        </div>
+                        <div class="compare-process-pids">
+                            <span>${safeBaseLabel}: ${basePids}</span>
+                            <span>${safeCompareLabel}: ${comparePids}</span>
+                        </div>
+                    </div>
+                    <div class="compare-process-grid">
+                        <div class="compare-process-grid-head"><span>Metric</span><strong>${safeBaseLabel}</strong><strong>${safeCompareLabel}</strong><em>Delta</em></div>
+                        ${renderMetric('Max RSS', 'maxRss', 1, ' MB', baseEntry, compareEntry)}
+                        ${renderMetric('Max Heap', 'maxHeap', 1, ' MB', baseEntry, compareEntry)}
+                        ${renderTextMetric('GC type', baseGcType, compareGcType)}
+                        ${renderMetric('GC time', 'totalGCTime', 3, ' s', baseEntry, compareEntry)}
+                        ${renderMetric('Duration', 'durationSeconds', 1, ' s', baseEntry, compareEntry)}
+                        ${renderMetric('Compiled', 'finalCompiledMethods', 0, '', baseEntry, compareEntry)}
+                        ${renderMetric('JIT time', 'jitTimeSeconds', 3, ' s', baseEntry, compareEntry)}
+                        ${renderMetric('Classes', 'finalClassesLoaded', 0, '', baseEntry, compareEntry)}
+                    </div>
+                    <div class="compare-process-details">
+                        ${renderGcFlagDiff(baseEntry, compareEntry)}
+                        ${renderFlags(baseEntry, safeBaseLabel)}
+                        ${renderFlags(compareEntry, safeCompareLabel)}
+                    </div>
+                </article>
+            `;
+        }).join('');
 
+        const peakDelta = (compareSummary.overallMaxRss || 0) - (baseSummary.overallMaxRss || 0);
         return `
-            <div style="margin: 1rem 0; padding: 1rem; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 0.75rem;">
-                <h3 style="margin-bottom: 0.5rem;">Process Summary</h3>
-                ${baseTable}
-                ${compareTable}
+            <div class="compare-process-summary">
+                <div class="compare-process-summary-head">
+                    <div>
+                        <h3>Process Comparison</h3>
+                        <p>Grouped by process name, with ${safeCompareLabel} deltas against ${safeBaseLabel}.</p>
+                    </div>
+                    <div class="compare-process-total"><span>Peak RSS delta</span><strong>${peakDelta > 0 ? '+' : ''}${formatValue(peakDelta, 1)} MB</strong></div>
+                </div>
+                <div class="compare-process-list">${cards}</div>
             </div>
         `;
     }
@@ -788,11 +1242,16 @@
         const baseHasGC = hasGCData(baseSamples);
         const compareHasGC = hasGCData(compareSamples);
         const showGC = baseHasGC && compareHasGC;
+        const showJIT = hasJITData(baseSamples) || hasJITData(compareSamples);
+        const showClasses = hasClassLoadingData(baseSamples) || hasClassLoadingData(compareSamples);
 
         const storedMode = localStorage.getItem(compareModeStorageKey) || 'split';
         const compareMode = storedMode === 'side' ? 'side' : 'split';
         const isSplitMode = compareMode === 'split';
         const splitLabel = `${baseLabel} vs ${compareLabel} (Split View)`;
+        const counterPanel = (metrics) => isSplitMode
+            ? metrics.map(([id, metricTitle]) => `<div class="chart-container"><h4>${metricTitle}</h4><div class="chart-wrapper"><div id="compare-${id}" style="width:100%;height:400px"></div></div></div>`).join('')
+            : metrics.map(([id, metricTitle]) => `<div class="compare-grid">${[baseLabel, compareLabel].map((label, index) => `<div class="chart-container"><h4>${metricTitle}: ${label}</h4><div class="chart-wrapper"><div id="compare-${index === 0 ? 'current' : 'other'}-${id}" style="width:100%;height:400px"></div></div></div>`).join('')}</div>`).join('');
 
         compareSection.innerHTML = `
             <div class="compare-header">
@@ -814,11 +1273,11 @@
                 </div>
                 <div class="meta" id="compare-replay-meta">Frame 0 / 0</div>
                 <div class="timeline">
-                    <input type="range" id="compare-replay-timeline" min="0" max="0" value="0">
+                    <input type="range" id="compare-replay-timeline" aria-label="Replay position" min="0" max="0" value="0">
                     <div class="meta" id="compare-replay-time-label">Elapsed: 0s</div>
                     <div class="meta">
                         Speed:
-                        <select id="compare-replay-speed">
+                        <select id="compare-replay-speed" aria-label="Playback speed">
                             <option value="5">5x</option>
                             <option value="10">10x</option>
                             <option value="15" selected>15x</option>
@@ -907,6 +1366,14 @@
                 </div>
                 `}
             </div>
+            ${showJIT ? counterPanel([
+                ['jit-time', 'Cumulative JIT Compilation Time'],
+                ['jit-rate', 'JIT Compilation Activity']
+            ]) : ''}
+            ${showClasses ? counterPanel([
+                ['classes-loaded', 'Cumulative Classes Loaded'],
+                ['class-rate', 'Class Loading Activity']
+            ]) : ''}
         `;
 
         compareSection.style.display = 'block';
@@ -1152,6 +1619,61 @@
                     tasks.push(Plotly.react('compare-other-gc', applyVisibilityToTraces('compare-other-gc', buildMetricTraces(compareData, timestamps, frameIndex, 'gc', compareStyle, compareElapsed)), sideGcLayout, getGcConfig(gcFilenameBase)));
                 }
             }
+            const renderCounterMetric = (id, metric, title, yTitle) => {
+                const layout = getCounterLayout(title, yTitle);
+                layout.xaxis = {
+                    ...layout.xaxis,
+                    title: 'Elapsed (s)',
+                    tickformat: null,
+                    type: 'linear',
+                    tickvals: isSplitMode ? tickVals : undefined,
+                    ticktext: isSplitMode ? tickText : undefined
+                };
+                layout.legend = {
+                    x: 0.5,
+                    y: -0.25,
+                    xanchor: 'center',
+                    orientation: 'h'
+                };
+                layout.margin = {
+                    ...layout.margin,
+                    b: 110
+                };
+                layout.shapes = isSplitMode ? [
+                    {
+                        type: 'line',
+                        x0: maxElapsed,
+                        x1: maxElapsed,
+                        y0: 0,
+                        y1: 1,
+                        xref: 'x',
+                        yref: 'paper',
+                        line: { color: '#94a3b8', width: 1, dash: 'dot' }
+                    }
+                ] : [];
+                const labelTraces = (traces, label) => traces.map(trace => ({
+                    ...trace,
+                    name: `${label}: ${trace.name}`
+                }));
+                if (isSplitMode) {
+                    const traces = [
+                        ...labelTraces(buildMetricTraces(baseData, timestamps, frameIndex, metric, baseStyle, elapsedSeconds), baseLabel),
+                        ...labelTraces(buildMetricTraces(compareData, timestamps, frameIndex, metric, compareStyle, compareElapsed), compareLabel)
+                    ];
+                    tasks.push(Plotly.react(`compare-${id}`, applyVisibilityToTraces(`compare-${id}`, traces), layout, getCounterConfig(`compare-${metric}`)));
+                } else {
+                    tasks.push(Plotly.react(`compare-current-${id}`, applyVisibilityToTraces(`compare-current-${id}`, buildMetricTraces(baseData, timestamps, frameIndex, metric, baseStyle, elapsedSeconds)), layout, getCounterConfig(`compare-current-${metric}`)));
+                    tasks.push(Plotly.react(`compare-other-${id}`, applyVisibilityToTraces(`compare-other-${id}`, buildMetricTraces(compareData, timestamps, frameIndex, metric, compareStyle, elapsedSeconds)), layout, getCounterConfig(`compare-other-${metric}`)));
+                }
+            };
+            if (showJIT) {
+                renderCounterMetric('jit-time', 'jitTime', 'Cumulative JIT Compilation Time', 'Compilation Time (s)');
+                renderCounterMetric('jit-rate', 'jitRate', 'JIT Compilation Activity', 'Compiled Methods / s');
+            }
+            if (showClasses) {
+                renderCounterMetric('classes-loaded', 'classesLoaded', 'Cumulative Classes Loaded', 'Classes Loaded');
+                renderCounterMetric('class-rate', 'classRate', 'Class Loading Activity', 'Classes / s');
+            }
             return Promise.all(tasks).then(() => {
                 const isTotalSplit = (name) => name === 'Total RSS Memory' || name === 'Compare Total RSS Memory';
                 const isTotalBase = (name) => name === 'Total RSS Memory';
@@ -1172,6 +1694,15 @@
                         attachLegendVisibilityHandlers('compare-other-gc');
                     }
                 }
+                const counterIds = ['jit-time', 'jit-rate', 'classes-loaded', 'class-rate'];
+                counterIds.forEach(id => {
+                    if (isSplitMode) {
+                        if (document.getElementById(`compare-${id}`)) attachLegendVisibilityHandlers(`compare-${id}`);
+                    } else {
+                        if (document.getElementById(`compare-current-${id}`)) attachLegendVisibilityHandlers(`compare-current-${id}`);
+                        if (document.getElementById(`compare-other-${id}`)) attachLegendVisibilityHandlers(`compare-other-${id}`);
+                    }
+                });
             });
         }
 
@@ -1265,19 +1796,37 @@
         attachLegendVisibilityHandlers,
         hasGCData,
         hasRatioData,
+        hasJITData,
+        hasClassLoadingData,
         buildColorMap,
         getMedianDelta,
         buildTotalRssSeries,
         buildForwardFilledSeries,
         buildExactSeries,
+        buildCounterSeries,
         buildReplayData,
         buildMetricTraces,
+        buildOverlayTraces,
+        getAvailableOverlayMetrics,
+        getOverlayLayout,
+        getOverlayConfig,
+        METRIC_CATALOG,
+        OVERLAY_PRESETS,
+        getGcType,
+        getGcFlags,
+        diffFlags,
         parseCsvText,
         parseJsonText,
+        expandSamples,
+        compactSamples,
+        normalizeReportData,
+        compactReportData,
         buildProcessSummary,
         normalizeCompareSamples,
         getGcLayout,
         getGcConfig,
+        getCounterLayout,
+        getCounterConfig,
         getRatioLayout,
         getRatioConfig,
         getMemoryLayout,

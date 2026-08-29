@@ -38,20 +38,80 @@ jobs:
         FE_URL=${FRONTEND_URL}
         echo "window.BUILD_PROCESS_WATCHER_CONFIG = {" > frontend/public/config.js
         echo "  backendUrl: '${BE_URL}'," >> frontend/public/config.js
-        echo "  frontendUrl: '${FE_URL}'" >> frontend/public/config.js
+        echo "  frontendUrl: '${FE_URL}'," >> frontend/public/config.js
+        echo "  predictiveReliability: false" >> frontend/public/config.js
         echo "};" >> frontend/public/config.js
 
+    - name: Configure Firebase credentials
+      env:
+        FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      run: |
+        credentials_file="${RUNNER_TEMP}/firebase-service-account.json"
+        printf '%s' "${FIREBASE_SERVICE_ACCOUNT}" > "${credentials_file}"
+        echo "GOOGLE_APPLICATION_CREDENTIALS=${credentials_file}" >> "${GITHUB_ENV}"
+
     - name: Deploy to Firebase Hosting
-      uses: FirebaseExtended/action-hosting-deploy@v0
-      with:
-        repoToken: ${{ secrets.GITHUB_TOKEN }}
-        firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
-        entryPoint: ./frontend
-        channelId: live
+      working-directory: ./frontend
+      env:
+        FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      run: |
+        set +e
+        deploy_output="$(npx firebase-tools@latest deploy --only hosting --project "${FIREBASE_PROJECT_ID}" --json 2>&1)"
+        deploy_status=$?
+        set -e
+
+        printf '%s\n' "${deploy_output}"
+
+        if [ "${deploy_status}" -eq 0 ]; then
+          exit 0
+        fi
+
+        if printf '%s\n' "${deploy_output}" | grep -q "is the current active version"; then
+          echo "Firebase Hosting already released this version; treating the idempotent retry as successful."
+          exit 0
+        fi
+
+        exit "${deploy_status}"
 
 
     - name: Output deployment URL
       run: |
         echo "🌐 Frontend deployed successfully!"
         echo "🔗 Frontend URL: ${FRONTEND_URL}"
+
+    - name: Verify crawler endpoints
+      run: |
+        set -euo pipefail
+
+        verify_endpoint() {
+          path="$1"
+          expected_type="$2"
+          expected_content="$3"
+          headers_file="$(mktemp)"
+          body_file="$(mktemp)"
+          trap 'rm -f "${headers_file}" "${body_file}"' RETURN
+
+          curl --fail --silent --show-error \
+            --dump-header "${headers_file}" \
+            --output "${body_file}" \
+            "https://process-watcher.web.app${path}"
+
+          content_type="$(grep -i '^content-type:' "${headers_file}" | tail -n 1 | tr -d '\r')"
+          case "${content_type}" in
+            *"${expected_type}"*) ;;
+            *)
+              echo "Unexpected Content-Type for ${path}: ${content_type}"
+              exit 1
+              ;;
+          esac
+
+          if ! grep -Fq "${expected_content}" "${body_file}"; then
+            echo "Expected content was not found at ${path}"
+            exit 1
+          fi
+        }
+
+        verify_endpoint "/robots.txt" "text/plain" \
+          "Sitemap: https://process-watcher.web.app/sitemap.xml"
+        verify_endpoint "/sitemap.xml" "application/xml" \
+          "<loc>https://process-watcher.web.app/</loc>"

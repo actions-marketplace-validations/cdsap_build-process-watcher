@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +20,7 @@ type Client struct {
 	ctx       context.Context
 }
 
-// NewClient creates a new storage client
+// NewClient creates a new storage client.
 func NewClient(ctx context.Context, projectID string) (*Client, error) {
 	client, err := firestore.NewClient(ctx, projectID)
 	if err != nil {
@@ -38,10 +39,52 @@ func (c *Client) Close() error {
 	return c.firestore.Close()
 }
 
+// SetRunExportToBigquery records that a run should be exported to BigQuery when it finishes.
+func (c *Client) SetRunExportToBigquery(runID string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	_, err := c.firestore.Collection("runs").Doc(runID).Set(c.ctx, map[string]interface{}{
+		"run_id":               runID,
+		"export_to_bigquery":   true,
+		"updated_at":           time.Now(),
+		"updated_at_timestamp": ToMillis(time.Now()),
+	}, firestore.MergeAll)
+	if err != nil {
+		return fmt.Errorf("merge export_to_bigquery for run %s: %w", runID, err)
+	}
+	log.Printf("📊 Marked run %s for BigQuery export on finish", runID)
+	return nil
+}
+
+// SetRunPredictiveReliability records that a run opted in to private predictive checkpoints.
+func (c *Client) SetRunPredictiveReliability(runID string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	now := time.Now()
+	_, err := c.firestore.Collection("runs").Doc(runID).Set(c.ctx, map[string]interface{}{
+		"run_id":                 runID,
+		"predictive_reliability": true,
+		"updated_at":             now,
+		"updated_at_timestamp":   ToMillis(now),
+	}, firestore.MergeAll)
+	if err != nil {
+		return fmt.Errorf("merge predictive_reliability for run %s: %w", runID, err)
+	}
+	log.Printf("🔮 Marked run %s for predictive reliability checkpoints", runID)
+	return nil
+}
+
 // GetRun retrieves a run document by ID
 func (c *Client) GetRun(runID string) (*models.RunDoc, error) {
+	return c.GetRunWithContext(c.ctx, runID)
+}
+
+// GetRunWithContext loads a run using ctx (use for requests or background timeouts).
+func (c *Client) GetRunWithContext(ctx context.Context, runID string) (*models.RunDoc, error) {
 	doc := c.firestore.Collection("runs").Doc(runID)
-	snapshot, err := doc.Get(c.ctx)
+	snapshot, err := doc.Get(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +120,14 @@ func (c *Client) StoreSamples(runID string, samples []models.Sample) error {
 			log.Printf("❌ Error parsing document data: %v", err)
 			return err
 		}
+		if runDoc.StartTime.IsZero() {
+			now := time.Now()
+			runDoc.StartTime = now
+			if runDoc.CreatedAt.IsZero() {
+				runDoc.CreatedAt = now
+			}
+			log.Printf("📄 Run %s had no start_time (e.g. export flag only); set to %v", runID, now)
+		}
 		log.Printf("📄 Found existing document with %d samples", len(runDoc.Samples))
 	} else {
 		now := time.Now()
@@ -107,6 +158,57 @@ func (c *Client) StoreSamples(runID string, samples []models.Sample) error {
 
 	log.Printf("✅ Successfully stored %d samples for run ID: %s", len(samples), runID)
 	return nil
+}
+
+// StorePredictionCheckpoint stores or replaces one prediction checkpoint for a run.
+func (c *Client) StorePredictionCheckpoint(runID string, checkpoint models.PredictionCheckpoint) error {
+	doc := c.firestore.Collection("runs").Doc(runID)
+	snapshot, err := doc.Get(c.ctx)
+	if err != nil && !strings.Contains(err.Error(), "not found") {
+		return err
+	}
+
+	var existing []models.PredictionCheckpoint
+	if snapshot != nil && snapshot.Exists() {
+		var runDoc models.RunDoc
+		if err := snapshot.DataTo(&runDoc); err != nil {
+			return err
+		}
+		existing = runDoc.PredictionCheckpoints
+	}
+
+	now := time.Now()
+	_, err = doc.Set(c.ctx, map[string]interface{}{
+		"run_id":                 runID,
+		"prediction_checkpoints": MergePredictionCheckpoint(existing, checkpoint),
+		"updated_at":             now,
+		"updated_at_timestamp":   ToMillis(now),
+	}, firestore.MergeAll)
+	if err != nil {
+		return fmt.Errorf("store prediction checkpoint for run %s: %w", runID, err)
+	}
+	return nil
+}
+
+// MergePredictionCheckpoint returns checkpoints sorted by window with one record per window.
+func MergePredictionCheckpoint(existing []models.PredictionCheckpoint, checkpoint models.PredictionCheckpoint) []models.PredictionCheckpoint {
+	merged := make([]models.PredictionCheckpoint, 0, len(existing)+1)
+	replaced := false
+	for _, item := range existing {
+		if item.ObservationWindowS == checkpoint.ObservationWindowS {
+			merged = append(merged, checkpoint)
+			replaced = true
+			continue
+		}
+		merged = append(merged, item)
+	}
+	if !replaced {
+		merged = append(merged, checkpoint)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].ObservationWindowS < merged[j].ObservationWindowS
+	})
+	return merged
 }
 
 // StoreProcessInfo stores or updates process information (VM flags) for a process in the processes collection
@@ -172,8 +274,13 @@ func (c *Client) StoreProcessInfo(runID string, processInfo models.ProcessInfo) 
 
 // GetProcesses retrieves process information for a run from the processes collection
 func (c *Client) GetProcesses(runID string) (*models.ProcessDoc, error) {
+	return c.GetProcessesWithContext(c.ctx, runID)
+}
+
+// GetProcessesWithContext loads processes/{runID} using ctx (for background BigQuery export).
+func (c *Client) GetProcessesWithContext(ctx context.Context, runID string) (*models.ProcessDoc, error) {
 	doc := c.firestore.Collection("processes").Doc(runID)
-	snapshot, err := doc.Get(c.ctx)
+	snapshot, err := doc.Get(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -194,31 +301,61 @@ func (c *Client) GetProcesses(runID string) (*models.ProcessDoc, error) {
 	return &processDoc, nil
 }
 
-// MarkRunAsFinished marks a run as finished
-func (c *Client) MarkRunAsFinished(runID string) error {
+// MarkRunAsFinished marks a run as finished. newlyFinished is true when this call transitioned the run to finished (so callers can enqueue async work such as BigQuery export).
+func (c *Client) MarkRunAsFinished(runID string) (newlyFinished bool, err error) {
 	doc := c.firestore.Collection("runs").Doc(runID)
 	snapshot, err := doc.Get(c.ctx)
-	if err != nil {
-		return err
-	}
-
-	if !snapshot.Exists() {
-		return fmt.Errorf("run %s not found", runID)
-	}
-
 	var runDoc models.RunDoc
-	if err := snapshot.DataTo(&runDoc); err != nil {
-		return err
+	now := time.Now()
+	if err != nil {
+		if !strings.Contains(err.Error(), "not found") {
+			return false, err
+		}
+		runDoc = models.RunDoc{
+			ID:        runID,
+			RunID:     runID,
+			StartTime: now,
+			CreatedAt: now,
+			Samples:   []models.Sample{},
+		}
+		log.Printf("Run %s did not exist at finish time; creating finished empty run", runID)
+	} else {
+		if !snapshot.Exists() {
+			runDoc = models.RunDoc{
+				ID:        runID,
+				RunID:     runID,
+				StartTime: now,
+				CreatedAt: now,
+				Samples:   []models.Sample{},
+			}
+			log.Printf("Run %s snapshot did not exist at finish time; creating finished empty run", runID)
+		} else if err := snapshot.DataTo(&runDoc); err != nil {
+			return false, err
+		}
 	}
 
 	// If already finished, nothing to do
 	if runDoc.Finished {
 		log.Printf("Run %s is already finished", runID)
-		return nil
+		return false, nil
 	}
 
 	// Mark as finished
-	now := time.Now()
+	if runDoc.ID == "" {
+		runDoc.ID = runID
+	}
+	if runDoc.RunID == "" {
+		runDoc.RunID = runID
+	}
+	if runDoc.StartTime.IsZero() {
+		runDoc.StartTime = now
+	}
+	if runDoc.CreatedAt.IsZero() {
+		runDoc.CreatedAt = now
+	}
+	if runDoc.Samples == nil {
+		runDoc.Samples = []models.Sample{}
+	}
 	runDoc.Finished = true
 	runDoc.FinishedAt = now
 	runDoc.UpdatedAt = now
@@ -229,10 +366,10 @@ func (c *Client) MarkRunAsFinished(runID string) error {
 	// Update in Firestore
 	_, err = doc.Set(c.ctx, runDoc)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 // FindStaleRuns finds runs that haven't been updated within the timeout period
@@ -344,8 +481,8 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 
 		parts := strings.Split(line, "|")
 		log.Printf("Split into %d parts: %v", len(parts), parts)
-		if len(parts) != 6 && len(parts) != 7 {
-			log.Printf("Skipping line %d: expected 6 or 7 parts, got %d", i, len(parts))
+		if len(parts) != 6 && len(parts) != 7 && len(parts) != 14 {
+			log.Printf("Skipping line %d: expected 6, 7, or 14 parts, got %d", i, len(parts))
 			continue
 		}
 
@@ -401,16 +538,16 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 		// Parse GC time if present (7th part)
 		// Format can be either "0.234s" (seconds) or legacy "234ms" (milliseconds)
 		var gcTime int
-		if len(parts) == 7 {
+		if len(parts) >= 7 {
 			gcTimeStr := parts[6]
-			isSeconds := strings.HasSuffix(gcTimeStr, "s")
 			isMilliseconds := strings.HasSuffix(gcTimeStr, "ms")
+			isSeconds := !isMilliseconds && strings.HasSuffix(gcTimeStr, "s")
 
 			// Remove suffix (either "s" or "ms")
-			if isSeconds {
-				gcTimeStr = strings.TrimSuffix(gcTimeStr, "s")
-			} else if isMilliseconds {
+			if isMilliseconds {
 				gcTimeStr = strings.TrimSuffix(gcTimeStr, "ms")
+			} else if isSeconds {
+				gcTimeStr = strings.TrimSuffix(gcTimeStr, "s")
 			}
 
 			if gcTimeStr != "N/A" && gcTimeStr != "" {
@@ -430,19 +567,42 @@ func ParseData(data string, startTime time.Time) ([]models.Sample, error) {
 			}
 		}
 
+		parseOptionalInt := func(index int, secondsToMillis bool) *int {
+			if index >= len(parts) || parts[index] == "" || parts[index] == "N/A" {
+				return nil
+			}
+			value, err := strconv.ParseFloat(strings.TrimSuffix(parts[index], "s"), 64)
+			if err != nil {
+				log.Printf("Warning: optional metric %d parsing failed: %v", index, err)
+				return nil
+			}
+			if secondsToMillis {
+				value *= 1000
+			}
+			parsed := int(value)
+			return &parsed
+		}
+
 		// Calculate consistent timestamp using startTime + elapsedTime
 		// This ensures all samples in the same monitoring cycle have the same timestamp
 		timestamp := startTime.Add(time.Duration(elapsedTime) * time.Second)
 
 		sample := models.Sample{
-			Timestamp:   ToMillis(timestamp),
-			ElapsedTime: elapsedTime,
-			PID:         parts[1],
-			Name:        parts[2],
-			HeapUsed:    heapUsed,
-			HeapCap:     heapCap,
-			RSS:         rss,
-			GCTime:      gcTime,
+			Timestamp:                  ToMillis(timestamp),
+			ElapsedTime:                elapsedTime,
+			PID:                        parts[1],
+			Name:                       parts[2],
+			HeapUsed:                   heapUsed,
+			HeapCap:                    heapCap,
+			RSS:                        rss,
+			GCTime:                     gcTime,
+			JITCompiledMethods:         parseOptionalInt(7, false),
+			JITFailedCompilations:      parseOptionalInt(8, false),
+			JITInvalidatedCompilations: parseOptionalInt(9, false),
+			JITCompilationTimeMs:       parseOptionalInt(10, true),
+			ClassesLoaded:              parseOptionalInt(11, false),
+			ClassesUnloaded:            parseOptionalInt(12, false),
+			ClassLoadTimeMs:            parseOptionalInt(13, true),
 		}
 
 		log.Printf("Created sample: %+v", sample)
